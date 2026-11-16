@@ -51,6 +51,8 @@ class PulseApp:
         # Pane focus: 0 = Browser, 1 = Queue
         self.active_pane: int = 0
         self.show_help: bool = False
+        self.show_cover_modal: bool = False
+        self.cover_modal_track: Optional[TrackMetadata] = None
         self.status_message: str = ""
         self.status_time: float = 0.0
 
@@ -72,7 +74,7 @@ class PulseApp:
         self.status_time = time.time()
 
     def _load_directory(self, path: Path) -> None:
-        """Scan directory for subdirectories and MP3 files."""
+        """Scan directory for subdirectories, MP3, and FLAC files."""
         self.current_dir = path.resolve()
         items: List[Tuple[str, Path, bool]] = []
 
@@ -93,7 +95,7 @@ class PulseApp:
 
                 if entry.is_dir():
                     dirs.append((f"{name}/", entry, True))
-                elif entry.is_file() and entry.suffix.lower() == ".mp3":
+                elif entry.is_file() and entry.suffix.lower() in (".mp3", ".flac"):
                     files.append((name, entry, False))
         except (PermissionError, OSError):
             self.set_status(f"ERR: ACCESS DENIED: {self.current_dir}")
@@ -145,6 +147,10 @@ class PulseApp:
                     break
 
     def _handle_input(self, ch: int) -> bool:
+        if self.show_cover_modal:
+            self.show_cover_modal = False
+            return True
+
         if self.show_help:
             self.show_help = False
             return True
@@ -157,6 +163,36 @@ class PulseApp:
 
         elif ch == ord('?'):
             self.show_help = True
+
+        elif ch in (ord('v'), ord('V')):
+            target_track: Optional[TrackMetadata] = None
+            if self.active_pane == 0 and self.browser_items:
+                name, path, is_dir = self.browser_items[self.browser_cursor]
+                if not is_dir and path.suffix.lower() in (".mp3", ".flac"):
+                    target_track = TrackMetadata.from_path(path)
+            elif self.active_pane == 1 and self.queue.tracks:
+                if 0 <= self.queue_cursor < len(self.queue.tracks):
+                    target_track = self.queue.tracks[self.queue_cursor]
+
+            if not target_track:
+                target_track = self.queue.current_track
+
+            if target_track:
+                if target_track.has_cover:
+                    temp_cover = target_track.save_cover_temp()
+                    if temp_cover:
+                        import subprocess
+                        try:
+                            subprocess.Popen(["open", str(temp_cover)])
+                        except Exception:
+                            pass
+                    self.cover_modal_track = target_track
+                    self.show_cover_modal = True
+                    self.set_status(f"COVER ART: {target_track.title}")
+                else:
+                    self.set_status(f"NO EMBEDDED COVER ART: {target_track.title}")
+            else:
+                self.set_status("NO TRACK SELECTED")
 
         elif ch == ord(' '):
             if self.audio.state == AudioState.STOPPED:
@@ -269,7 +305,11 @@ class PulseApp:
             name, path, is_dir = self.browser_items[self.browser_cursor]
             if is_dir:
                 added = 0
-                for f in sorted(list(path.glob("*.mp3")) + list(path.glob("*.MP3"))):
+                found = []
+                for pat in ("*.mp3", "*.MP3", "*.flac", "*.FLAC"):
+                    found.extend(path.glob(pat))
+                found.sort(key=lambda p: p.name.lower())
+                for f in found:
                     self.queue.add_track(TrackMetadata.from_path(f))
                     added += 1
                 self.set_status(f"QUEUED: {added} TRACKS ({path.name}/)")
@@ -317,6 +357,11 @@ class PulseApp:
             self.stdscr.refresh()
             return
 
+        if self.show_cover_modal and self.cover_modal_track:
+            self._render_cover_modal(h, w)
+            self.stdscr.refresh()
+            return
+
         if self.show_help:
             self._render_help_screen(h, w)
             self.stdscr.refresh()
@@ -327,14 +372,16 @@ class PulseApp:
 
         # 2. Main File & Queue Split View
         if h >= 28:
-            vis_h = 7
-        elif h >= 24:
             vis_h = 6
+            tele_h = 6
+        elif h >= 25:
+            vis_h = 5
+            tele_h = 5
         else:
             vis_h = 5
+            tele_h = 4
 
-        tele_h = 4
-        main_h = max(6, h - vis_h - tele_h - 3)
+        main_h = max(5, h - vis_h - tele_h - 3)
 
         if w >= 80:
             left_w = w // 2
@@ -427,7 +474,12 @@ class PulseApp:
                     attr = curses.A_NORMAL
                     marker = "  "
 
-                tag = "[DIR] " if is_dir else "[MP3] "
+                if is_dir:
+                    tag = "[DIR] "
+                elif path.suffix.lower() == ".flac":
+                    tag = "[FLAC]"
+                else:
+                    tag = "[MP3] "
                 entry_str = f"{marker}{tag}{name}"
                 fill_len = width - 4
                 self._safe_addstr(row_y, left, "│ ", box_attr)
@@ -575,73 +627,200 @@ class PulseApp:
 
     def _render_telemetry_box(self, top: int, left: int, height: int, width: int) -> None:
         """Render 1-bit pixel playback telemetry, dithered progress, and mode meters."""
-        self._safe_addstr(top, left, "┌─[ TELEMETRY ]" + ("─" * (width - 16)) + "┐", curses.A_NORMAL)
+        self._safe_addstr(top, left, "┌─[ NOW PLAYING & COVER ]" + ("─" * max(0, width - 26)) + "┐", curses.A_NORMAL)
 
         track = self.queue.current_track
         curr_sec, tot_sec, pct = self.audio.get_progress()
 
-        # Row 1: Track title and format info
-        if track:
-            state_tag = "[PLAY]" if self.audio.state == AudioState.PLAYING else "[PAUSE]"
-            if self.audio.state == AudioState.STOPPED:
-                state_tag = "[STOP]"
+        inner_h = max(2, height - 2)
 
-            artist_title = f"{track.artist} - {track.title}" if track.artist != "Unknown Artist" else track.title
-            specs = f"[{track.bitrate}k / {track.channels.upper()}]"
-            avail_w = width - len(state_tag) - len(specs) - 6
-            t_str = artist_title[:avail_w]
-            line1 = f"│ {state_tag} {t_str:<{avail_w}} {specs} │"
+        # Show side-by-side cover thumbnail when height >= 5 and width >= 72
+        if height >= 5 and width >= 72:
+            art_w = 14
+            art_lines = track.get_pixel_art(art_w, inner_h) if track else TrackMetadata.empty_pixel_art(art_w, inner_h)
+            info_w = max(10, width - 4 - art_w - 3)
+
+            # Row 0: Status & Track Title
+            if track:
+                state_tag = "[PLAY]" if self.audio.state == AudioState.PLAYING else "[PAUSE]"
+                if self.audio.state == AudioState.STOPPED:
+                    state_tag = "[STOP]"
+                artist_title = f"{track.artist} - {track.title}" if track.artist != "Unknown Artist" else track.title
+                specs = f"[{track.file_format} {track.bitrate}k / {track.channels.upper()}]"
+                avail_title = max(8, info_w - len(state_tag) - len(specs) - 2)
+                t_str = artist_title[:avail_title]
+                row0 = f"{state_tag} {t_str:<{avail_title}} {specs}"
+            else:
+                row0 = "[IDLE] NO TRACK LOADED"
+
+            # Row 1: Album & Genre
+            if track:
+                alb_str = f"ALBUM: {track.album}" + (f" ({track.year})" if track.year else "")
+                if track.genre:
+                    alb_str += f"  GENRE: {track.genre}"
+                row1 = alb_str[:info_w]
+            else:
+                row1 = "BROWSE AND SELECT AUDIO WITH [ENTER]"
+
+            # Row 2: Dithered Scrubber Bar
+            curr_str = format_duration(curr_sec)
+            tot_str = format_duration(tot_sec)
+            rem_sec = max(0.0, tot_sec - curr_sec)
+            rem_str = f"-{format_duration(rem_sec)}"
+            t_pre = f"{curr_str} ["
+            t_post = f"] {tot_str} ({rem_str}) {pct:5.1f}%"
+            fixed_len = len(t_pre) + len(t_post)
+            bar_w = max(6, info_w - fixed_len)
+            if tot_sec > 0:
+                filled_len = int((curr_sec / tot_sec) * bar_w)
+                dither_len = min(2, filled_len)
+                solid_len = max(0, filled_len - dither_len)
+                empty_len = max(0, bar_w - filled_len)
+                bar_chars = ("█" * solid_len) + ("▓" * dither_len) + ("░" * empty_len)
+            else:
+                bar_chars = "░" * bar_w
+            row2 = f"{t_pre}{bar_chars}{t_post}"
+
+            # Row 3: Mode / Volume / Cover key
+            now = time.time()
+            if self.is_filtering:
+                row3 = f"QUERY: {self.filter_query}_ [ENTER: CONFIRM  ESC: CANCEL]"
+            elif self.status_message and (now - self.status_time < 3.0):
+                row3 = f"STATUS >> {self.status_message}"
+            else:
+                vol_lvl = int(self.audio.volume * 10)
+                vol_bar = ("█" * vol_lvl) + ("░" * (10 - vol_lvl))
+                vol_str = f"VOL:[{vol_bar}]"
+                rep_str = f"LOOP:{self.queue.repeat_mode.name}"
+                shuf_str = f"SHUF:{'ON' if self.queue.is_shuffled else 'OFF'}"
+                trk_str = f"TRK:{self.queue.current_index + 1:02d}/{self.queue.count:02d}" if self.queue.count else "TRK:--/--"
+                cover_hint = "[V] COVER"
+                row3 = f"{vol_str} │ {rep_str} │ {shuf_str} │ {trk_str} │ {cover_hint}"
+
+            rows = [row0, row1, row2, row3]
+            while len(rows) < inner_h:
+                rows.append("")
+
+            for idx in range(inner_h):
+                row_y = top + 1 + idx
+                art = art_lines[idx] if idx < len(art_lines) else (" " * art_w)
+                text = rows[idx]
+                self._safe_addstr(row_y, left, "│ ", curses.A_NORMAL)
+                self._safe_addstr(row_y, left + 2, art, curses.A_NORMAL)
+                self._safe_addstr(row_y, left + 2 + art_w, " │ ", curses.A_DIM)
+                self._safe_addstr(row_y, left + 2 + art_w + 3, f"{text:<{info_w}}"[:info_w], curses.A_BOLD if idx == 0 else curses.A_NORMAL)
+                self._safe_addstr(row_y, left + width - 1, "│", curses.A_NORMAL)
+
+            self._safe_addstr(top + height - 1, left, "└" + ("─" * (width - 2)) + "┘", curses.A_NORMAL)
         else:
-            line1 = f"│ [IDLE] NO TRACK LOADED.{' ' * (width - 27)}│"
+            # Compact fallback for small windows
+            if track:
+                state_tag = "[PLAY]" if self.audio.state == AudioState.PLAYING else "[PAUSE]"
+                if self.audio.state == AudioState.STOPPED:
+                    state_tag = "[STOP]"
+                artist_title = f"{track.artist} - {track.title}" if track.artist != "Unknown Artist" else track.title
+                specs = f"[{track.file_format} {track.bitrate}k / {track.channels.upper()}]"
+                avail_w = max(6, width - len(state_tag) - len(specs) - 6)
+                t_str = artist_title[:avail_w]
+                line1 = f"│ {state_tag} {t_str:<{avail_w}} {specs} │"
+            else:
+                line1 = f"│ [IDLE] NO TRACK LOADED.{' ' * max(0, width - 27)}│"
 
-        self._safe_addstr(top + 1, left, line1, curses.A_BOLD)
+            self._safe_addstr(top + 1, left, line1, curses.A_BOLD)
 
-        # Row 2: 1-Bit Dithered Scrubber Bar
-        curr_str = format_duration(curr_sec)
-        tot_str = format_duration(tot_sec)
-        rem_sec = max(0.0, tot_sec - curr_sec)
-        rem_str = f"-{format_duration(rem_sec)}"
+            # Scrubber Bar
+            curr_str = format_duration(curr_sec)
+            tot_str = format_duration(tot_sec)
+            rem_sec = max(0.0, tot_sec - curr_sec)
+            rem_str = f"-{format_duration(rem_sec)}"
+            time_pre = f"{curr_str} ["
+            time_post = f"] {tot_str} ({rem_str}) {pct:5.1f}%"
+            fixed_len = len(time_pre) + len(time_post) + 4
+            bar_w = max(6, width - fixed_len)
 
-        time_pre = f"{curr_str} ["
-        time_post = f"] {tot_str} ({rem_str}) {pct:5.1f}%"
-        fixed_len = len(time_pre) + len(time_post) + 4
-        bar_w = max(10, width - fixed_len)
+            if tot_sec > 0:
+                filled_len = int((curr_sec / tot_sec) * bar_w)
+                dither_len = min(2, filled_len)
+                solid_len = max(0, filled_len - dither_len)
+                empty_len = max(0, bar_w - filled_len)
+                bar_chars = ("█" * solid_len) + ("▓" * dither_len) + ("░" * empty_len)
+            else:
+                bar_chars = "░" * bar_w
 
-        if tot_sec > 0:
-            filled_len = int((curr_sec / tot_sec) * bar_w)
-            # 1-bit dithered fill: solid pixel body with dithered lead
-            dither_len = min(2, filled_len)
-            solid_len = max(0, filled_len - dither_len)
-            empty_len = max(0, bar_w - filled_len)
-            bar_chars = ("█" * solid_len) + ("▓" * dither_len) + ("░" * empty_len)
-        else:
-            bar_chars = "░" * bar_w
+            line2 = f"│ {time_pre}{bar_chars}{time_post}{' ' * max(0, width - fixed_len - bar_w)} │"
+            self._safe_addstr(top + 2, left, line2, curses.A_NORMAL)
 
-        line2 = f"│ {time_pre}{bar_chars}{time_post}{' ' * max(0, width - fixed_len - bar_w)} │"
-        self._safe_addstr(top + 2, left, line2, curses.A_NORMAL)
+            # Mode / Volume bar
+            now = time.time()
+            if self.is_filtering:
+                status_text = f"QUERY: {self.filter_query}_ [ENTER/ESC]"
+            elif self.status_message and (now - self.status_time < 3.0):
+                status_text = f"STATUS >> {self.status_message}"
+            else:
+                vol_lvl = int(self.audio.volume * 10)
+                vol_bar = ("█" * vol_lvl) + ("░" * (10 - vol_lvl))
+                vol_str = f"VOL:[{vol_bar}]"
+                rep_str = f"LOOP:{self.queue.repeat_mode.name}"
+                cover_hint = "[V] COVER"
+                status_text = f"{vol_str} │ {rep_str} │ {cover_hint}"
 
-        # Row 3: Status / Mode meters & message
-        now = time.time()
-        if self.is_filtering:
-            status_text = f"QUERY: {self.filter_query}_ [ENTER: CONFIRM  ESC: CANCEL]"
-        elif self.status_message and (now - self.status_time < 3.0):
-            status_text = f"STATUS >> {self.status_message}"
-        else:
-            vol_lvl = int(self.audio.volume * 10)
-            vol_bar = ("█" * vol_lvl) + ("░" * (10 - vol_lvl))
-            vol_str = f"VOL:[{vol_bar}]"
-            rep_str = f"LOOP:{self.queue.repeat_mode.name}"
-            shuf_str = f"SHUF:{'ON' if self.queue.is_shuffled else 'OFF'}"
-            track_num = f"TRK:{self.queue.current_index + 1:02d}/{self.queue.count:02d}" if self.queue.count else "TRK:--/--"
-            status_text = f"{vol_str}  │  {rep_str}  │  {shuf_str}  │  {track_num}"
+            self._safe_addstr(top + 3, left, "└" + ("─" * (width - 2)) + "┘", curses.A_NORMAL)
+            self._safe_addstr(top + 3, left + 3, f" {status_text} ", curses.A_BOLD)
 
-        self._safe_addstr(top + 3, left, "└" + ("─" * (width - 2)) + "┘", curses.A_NORMAL)
-        # Overlay status inside frame
-        self._safe_addstr(top + 3, left + 3, f" {status_text} ", curses.A_BOLD)
+    def _render_cover_modal(self, h: int, w: int) -> None:
+        """Render high-resolution 1-bit pixel art cover modal."""
+        track = self.cover_modal_track
+        if not track:
+            return
+
+        box_w = min(72, w - 4)
+        box_h = min(16, h - 4)
+        top = (h - box_h) // 2
+        left = (w - box_w) // 2
+
+        for r in range(box_h):
+            self._safe_addstr(top + r, left, " " * box_w, curses.color_pair(1))
+
+        self._safe_addstr(top, left, "┌" + ("─" * (box_w - 2)) + "┐", curses.A_BOLD)
+        header_title = f" ■ ALBUM ART // {track.title[:24].upper()} "
+        self._safe_addstr(top + 1, left, "│ " + header_title + (" " * max(0, box_w - 4 - len(header_title))) + " │", curses.color_pair(2) | curses.A_BOLD)
+        self._safe_addstr(top + 2, left, "├" + ("─" * (box_w - 2)) + "┤", curses.A_BOLD)
+
+        inner_h = box_h - 4
+        art_w = min(22, max(12, box_w // 3))
+        lines = track.get_pixel_art(art_w, inner_h)
+
+        details = [
+            f"TRACK:  {track.title}",
+            f"ARTIST: {track.artist}",
+            f"ALBUM:  {track.album}" + (f" ({track.year})" if track.year else ""),
+            f"GENRE:  {track.genre}" if track.genre else "",
+            f"FORMAT: {track.file_format} Lossless" if track.file_format == "FLAC" else f"FORMAT: {track.file_format}",
+            f"SPECS:  {track.sample_rate} Hz / {track.channels}",
+            f"RATE:   {track.bitrate} kbps",
+            "",
+            "• OPENED IN MACOS PREVIEW",
+            "[ PRESS ANY KEY TO DISMISS ]",
+        ]
+        active_details = [d for d in details if d != ""]
+
+        for idx in range(inner_h):
+            row_y = top + 3 + idx
+            art_line = lines[idx] if idx < len(lines) else (" " * art_w)
+            det_line = active_details[idx] if idx < len(active_details) else ""
+            avail_det = max(0, box_w - 4 - art_w - 3)
+
+            self._safe_addstr(row_y, left, "│ ", curses.A_BOLD)
+            self._safe_addstr(row_y, left + 2, art_line, curses.A_NORMAL)
+            self._safe_addstr(row_y, left + 2 + art_w, " │ ", curses.A_DIM)
+            self._safe_addstr(row_y, left + 2 + art_w + 3, f"{det_line:<{avail_det}}"[:avail_det], curses.A_BOLD if "PRESS" in det_line or "OPENED" in det_line else curses.A_NORMAL)
+            self._safe_addstr(row_y, left + box_w - 1, "│", curses.A_BOLD)
+
+        self._safe_addstr(top + box_h - 1, left, "└" + ("─" * (box_w - 2)) + "┘", curses.A_BOLD)
 
     def _render_footer(self, y: int, width: int) -> None:
         """High-contrast solid pixel command bar."""
-        cmd_text = " [SPACE] PLAY/PAUSE  [ENTER] OPEN/PLAY  [A] ADD  [TAB] PANE  [←/→] SEEK  [+/-] VOL  [Q] QUIT "
+        cmd_text = " [SPACE] PLAY/PAUSE  [ENTER] SELECT  [A] ADD  [TAB] PANE  [V] COVER  [←/→] SEEK  [+/-] VOL  [Q] QUIT "
         self._safe_addstr(y, 0, " " * width, curses.color_pair(2))
         self._safe_addstr(y, 0, cmd_text[:width], curses.color_pair(2) | curses.A_BOLD)
 
@@ -665,6 +844,7 @@ class PulseApp:
             "  N / P          NEXT / PREV TRACK",
             "  R              CYCLE REPEAT (OFF -> TRACK -> QUEUE)",
             "  S              TOGGLE SHUFFLE",
+            "  V              VIEW COVER ART (IN-TERMINAL & PREVIEW)",
             "",
             "NAVIGATION & LIBRARY:",
             "  J / K (UP/DN)  MOVE SELECTION",

@@ -14,18 +14,19 @@ def main() -> None:
     """Parse CLI arguments and run the application."""
     parser = argparse.ArgumentParser(
         prog="pulse",
-        description="Pulse CLI - A sleek, keyboard-driven terminal MP3 player for macOS.",
+        description="Pulse CLI - A pure 1-bit monochrome terminal MP3 & FLAC music player for macOS with live audio spectrum and cover art.",
         epilog="Examples:\n"
                "  pulse                     # Launch in default directory (~/Music or cwd)\n"
                "  pulse ~/Music/Favorites   # Open directly to a folder\n"
-               "  pulse song.mp3            # Play song immediately\n",
+               "  pulse song.flac           # Play FLAC with embedded cover art immediately\n"
+               "  pulse song.mp3            # Play MP3 immediately\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "path",
         nargs="?",
         default=None,
-        help="Path to an MP3 file to play or directory to browse",
+        help="Path to an MP3 or FLAC file to play or directory to browse",
     )
     parser.add_argument(
         "-v", "--version",
@@ -45,8 +46,8 @@ def main() -> None:
             sys.exit(1)
 
         if target.is_file():
-            if target.suffix.lower() != ".mp3":
-                sys.stderr.write(f"Error: Pulse CLI only supports MP3 files. Given: {target.name}\n")
+            if target.suffix.lower() not in (".mp3", ".flac"):
+                sys.stderr.write(f"Error: Pulse CLI supports MP3 and FLAC audio files. Given: {target.name}\n")
                 sys.exit(1)
             auto_play_file = target
             initial_path = target.parent

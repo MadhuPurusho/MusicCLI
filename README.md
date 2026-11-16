@@ -6,16 +6,31 @@
   <a href="https://www.python.org"><img src="https://img.shields.io/badge/python-3.9+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.9+"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/code-MIT-4183c4?style=flat-square" alt="License: MIT"></a>
   <a href="https://github.com/pookie421/MusicCLI"><img src="https://img.shields.io/badge/audio-CoreAudio-gray?style=flat-square" alt="Audio: CoreAudio"></a>
+  <a href="https://github.com/pookie421/MusicCLI"><img src="https://img.shields.io/badge/formats-FLAC%20%7C%20MP3-brightgreen?style=flat-square" alt="Formats: FLAC & MP3"></a>
   <a href="https://github.com/pookie421/MusicCLI"><img src="https://img.shields.io/badge/ui-1--bit%20curses-black?style=flat-square" alt="UI: 1-Bit Curses"></a>
 </p>
 
 <p align="center">
-  A high-performance, 1-bit monochrome terminal MP3 player for macOS with real-time discrete hardware spectrum analysis and zero pseudo-GUI bloat.
+  A high-performance, 1-bit monochrome terminal MP3 & FLAC music player for macOS with real-time discrete hardware spectrum analysis, embedded album cover art rendering, and zero pseudo-GUI bloat.
 </p>
 
 <p align="center">
   <img src="docs/preview.png" alt="Pulse CLI Interface" width="100%" />
 </p>
+
+---
+
+## Features
+
+- **Lossless & Lossy Playback**: Native CoreAudio playback for both **FLAC** (lossless) and **MP3** files.
+- **Embedded Album Cover Art**:
+  - **In-Terminal 1-Bit Pixel Art**: Real-time Floyd-Steinberg dithered album cover thumbnails embedded directly in the player telemetry panel.
+  - **Full-Resolution macOS Preview (`V` key)**: Instant one-keystroke extraction to view the crystal-clear original cover artwork in macOS Preview.
+  - **Expanded Pixel Art Modal**: Full-screen high-resolution monochrome cover art viewer inside the terminal.
+- **Pure 1-Bit Monochrome Design**: Authentic high-contrast black-and-white curses aesthetics with zero ANSI color slop or pseudo-GUI web bloat.
+- **Live Hardware Spectrum Analyzer**: Real-time frequency response visualization with peak-hold dot indicators at 25 FPS.
+- **Vim & POSIX Keybindings**: Seamless navigation with `hjkl`, `Space`, and standard terminal shortcuts.
+- **Full Library Explorer & Queue Management**: Interactive file browser, search filtering (`/`), recursive folder enqueueing (`A`), and shuffle/repeat modes.
 
 ---
 
@@ -54,8 +69,9 @@ pulse
 # Open directly into a specific folder
 pulse ~/Music/Electronic
 
-# Play an MP3 file immediately
-pulse /path/to/song.mp3
+# Play a FLAC or MP3 file immediately
+pulse song.flac
+pulse song.mp3
 
 # Display argument options
 pulse --help
@@ -76,6 +92,7 @@ The application operates entirely within the terminal using standard POSIX and V
 | **Next / Previous Track** | `N` / `P` |
 | **Cycle Repeat Mode** | `R` *(Off → Track → Queue)* |
 | **Toggle Shuffle Mode** | `S` *(On / Off)* |
+| **View Cover Art** | `V` *(Opens hi-res in Preview + expanded terminal modal)* |
 | **Navigate Selection** | `j` / `k` (or `Up` / `Down`) |
 | **Open Folder / Play File** | `Enter` (or `l`) |
 | **Ascend to Parent Folder** | `Backspace` (or `h`) |
@@ -99,14 +116,15 @@ The application operates entirely within the terminal using standard POSIX and V
 |  +-------------------------------------+  +--------------------------------+  |
 |  |  [1: FILES]                         |  |  [2: QUEUE]                    |  |
 |  |  - Direct Inode Navigation (../)    |  |  - Sequential / Shuffle Model  |  |
-|  |  - Strict MP3 Filter (.mp3)         |  |  - Direct Index Traversal      |  |
+|  |  - MP3 & FLAC Filtering             |  |  - Direct Index Traversal      |  |
 |  |  - Instant Substring Search (/)     |  |  - Track Scrubber Accounting   |  |
 |  +-------------------------------------+  +--------------------------------+  |
 |                                                                               |
 |  +-------------------------------------------------------------------------+  |
 |  |  Dynamic Spectral Equalizer (Real-Time Unicode Discrete Block Array)    |  |
 |  +-------------------------------------------------------------------------+  |
-|  |  Now Playing Telemetry, Progress Scrubber, and Status Metrics           |  |
+|  |  1-Bit Album Cover Thumbnail | Now Playing Telemetry & Scrubber         |  |
+|  +-------------------------------------------------------------------------+  |
 +-------------------------------------------------------------------------------+
                                     |        ^
                        State Events |        | PCM Energy Levels
@@ -116,18 +134,19 @@ The application operates entirely within the terminal using standard POSIX and V
 |                     (miniaudio / Darwin CoreAudio Host)                       |
 |                                                                               |
 |   +-------------------+    +--------------------+    +--------------------+   |
-|   | MP3 Bitstream     | -> | 44.1 kHz Stereo    | -> | CoreAudio Output   |   |
+|   | FLAC / MP3 Stream | -> | 44.1 kHz Stereo    | -> | CoreAudio Output   |   |
 |   | Decoder           |    | PCM Circular Ring  |    | Buffer (1024 smp)  |   |
 |   +-------------------+    +--------------------+    +--------------------+   |
 +-------------------------------------------------------------------------------+
 ```
 
 ### Signal Processing Pipeline
-1. **Decode Phase**: Incoming MP3 bitstreams are decoded into contiguous signed 16-bit interleaved PCM normalized to a constant sampling frequency of 44,100 Hz (Stereo).
+1. **Decode Phase**: Incoming FLAC and MP3 bitstreams are decoded into contiguous signed 16-bit interleaved PCM normalized to a constant sampling frequency of 44,100 Hz (Stereo).
 2. **Buffering & Delivery**: An audio generator supplies 1024-frame chunks to the native macOS CoreAudio bus via `miniaudio`.
 3. **Sub-Millisecond Seeking**: Temporal seek offsets map directly to memory indices via:
    $$\text{Frame Offset} = \text{Target Time (seconds)} \times 44100$$
 4. **Spectral Analysis**: Real-time amplitude metrics are processed at 25 Hz and rendered as high-contrast discrete pixel blocks with peak-hold indicators.
+5. **Cover Art Synthesis**: Embedded metadata (FLAC Picture blocks & ID3 APIC frames) are dynamically resampled and converted to 1-bit Floyd-Steinberg dithered pixel art using half-block Unicode characters (`▀`, `▄`, `█`, ` `).
 
 ---
 
@@ -149,13 +168,13 @@ MusicCLI/
 |   |-- __main__.py          # CLI entry point and argument parsing
 |   |-- app.py               # 1-bit monochrome curses interface loop
 |   |-- audio.py             # CoreAudio driver and PCM streaming
-|   |-- metadata.py          # ID3 extraction and duration calculation
+|   |-- metadata.py          # FLAC/ID3 metadata & 1-bit cover art engine
 |   `-- queue_manager.py     # Deterministic and randomized queue models
 |-- docs/
 |   |-- preview.png          # High-resolution UI preview
 |   `-- preview.svg          # Vector terminal graphic
 |-- pyproject.toml           # PEP 621 package metadata
-|-- requirements.txt         # Minimal runtime dependencies (miniaudio, mutagen)
+|-- requirements.txt         # Dependencies (miniaudio, mutagen, Pillow)
 |-- install.sh               # Local deployment script
 |-- LICENSE                  # MIT License
 `-- README.md                # System documentation
