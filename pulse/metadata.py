@@ -115,13 +115,22 @@ class TrackMetadata:
 
     def get_pixel_art(self, width: int = 14, height: int = 5) -> List[str]:
         """Generate a 1-bit monochrome pixel-art rendition of the actual album cover."""
+        if not hasattr(self, "_pixel_art_cache"):
+            self._pixel_art_cache = {}
+        cache_key = (width, height)
+        if cache_key in self._pixel_art_cache:
+            return self._pixel_art_cache[cache_key]
+
         if not self.has_cover:
-            return TrackMetadata.empty_pixel_art(width, height)
+            res = TrackMetadata.empty_pixel_art(width, height)
+            self._pixel_art_cache[cache_key] = res
+            return res
 
         try:
-            from PIL import Image
+            from PIL import Image, ImageOps
 
             im = Image.open(io.BytesIO(self.cover_data)).convert("L")
+            im = ImageOps.autocontrast(im)
             resized = im.resize((width, height * 2), Image.Resampling.LANCZOS)
             dithered = resized.convert("1")
 
@@ -140,9 +149,12 @@ class TrackMetadata:
                     else:
                         row.append(" ")
                 lines.append("".join(row))
+            self._pixel_art_cache[cache_key] = lines
             return lines
         except Exception:
-            return TrackMetadata.empty_pixel_art(width, height)
+            res = TrackMetadata.empty_pixel_art(width, height)
+            self._pixel_art_cache[cache_key] = res
+            return res
 
     def save_cover_temp(self) -> Optional[Path]:
         """Save cover art to a temporary file for viewing in macOS Preview."""

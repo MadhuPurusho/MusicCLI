@@ -48,11 +48,12 @@ class PulseApp:
         self.queue_cursor: int = 0
         self.queue_scroll: int = 0
 
-        # Pane focus: 0 = Browser, 1 = Queue
+        # Pane focus: 0 = Browser, 1 = Queue, 2 = Album Art
         self.active_pane: int = 0
         self.show_help: bool = False
         self.show_cover_modal: bool = False
         self.cover_modal_track: Optional[TrackMetadata] = None
+        self._meta_cache: dict[Path, TrackMetadata] = {}
         self.status_message: str = ""
         self.status_time: float = 0.0
 
@@ -169,7 +170,9 @@ class PulseApp:
             if self.active_pane == 0 and self.browser_items:
                 name, path, is_dir = self.browser_items[self.browser_cursor]
                 if not is_dir and path.suffix.lower() in (".mp3", ".flac"):
-                    target_track = TrackMetadata.from_path(path)
+                    if path not in self._meta_cache:
+                        self._meta_cache[path] = TrackMetadata.from_path(path)
+                    target_track = self._meta_cache[path]
             elif self.active_pane == 1 and self.queue.tracks:
                 if 0 <= self.queue_cursor < len(self.queue.tracks):
                     target_track = self.queue.tracks[self.queue_cursor]
@@ -180,18 +183,8 @@ class PulseApp:
             if target_track:
                 self.cover_modal_track = target_track
                 self.show_cover_modal = True
-                if target_track.has_cover:
-                    temp_cover = target_track.save_cover_temp()
-                    if temp_cover:
-                        import subprocess
-                        try:
-                            subprocess.Popen(["open", str(temp_cover)])
-                        except Exception:
-                            pass
-                    src_tag = f" ({target_track.cover_source.upper()})" if target_track.cover_source else ""
-                    self.set_status(f"COVER{src_tag}: OPENED IN PREVIEW")
-                else:
-                    self.set_status(f"NO COVER ART: {target_track.title}")
+                src_tag = f" ({target_track.cover_source.upper()})" if target_track.cover_source else ""
+                self.set_status(f"ALBUM ART EXPANDED{src_tag}")
             else:
                 self.set_status("NO TRACK SELECTED")
 
@@ -207,7 +200,19 @@ class PulseApp:
                 self.audio.toggle_play_pause()
 
         elif ch == ord('\t'):
-            self.active_pane = 1 - self.active_pane
+            self.active_pane = (self.active_pane + 1) % 3
+
+        elif ch == ord('1'):
+            self.active_pane = 0
+            self.set_status("PANE: [1] FILES")
+
+        elif ch == ord('2'):
+            self.active_pane = 1
+            self.set_status("PANE: [2] QUEUE")
+
+        elif ch == ord('3'):
+            self.active_pane = 2
+            self.set_status("PANE: [3] ALBUM ART")
 
         elif ch == ord('/'):
             self.is_filtering = True
@@ -253,10 +258,26 @@ class PulseApp:
 
         if self.active_pane == 0:
             self._handle_browser_input(ch)
-        else:
+        elif self.active_pane == 1:
             self._handle_queue_input(ch)
+        else:
+            self._handle_art_input(ch)
 
         return True
+
+    def _handle_art_input(self, ch: int) -> None:
+        if ch in (10, 13, curses.KEY_ENTER, ord(' ')):
+            if self.audio.state == AudioState.STOPPED:
+                t = self.queue.current_track
+                if t:
+                    self.audio.load_track(t)
+            else:
+                self.audio.toggle_play_pause()
+        elif ch in (ord('v'), ord('V')):
+            t = self.queue.current_track
+            if t:
+                self.cover_modal_track = t
+                self.show_cover_modal = True
 
     def _handle_filter_input(self, ch: int) -> bool:
         if ch in (10, 13, curses.KEY_ENTER):
@@ -371,29 +392,41 @@ class PulseApp:
         # 1. Top Header Box
         self._render_header(w)
 
-        # 2. Main File & Queue Split View
+        # 2. Main Split View: Files | Queue | Album Art
         if h >= 28:
             vis_h = 6
-            tele_h = 6
-        elif h >= 25:
+            tele_h = 5
+        elif h >= 24:
             vis_h = 5
             tele_h = 5
         else:
-            vis_h = 5
+            vis_h = 4
             tele_h = 4
 
         main_h = max(5, h - vis_h - tele_h - 3)
 
-        if w >= 80:
-            left_w = w // 2
-            right_w = w - left_w
-            self._render_browser_pane(2, 0, main_h, left_w)
-            self._render_queue_pane(2, left_w, main_h, right_w)
+        if w >= 96:
+            col1_w = int(w * 0.36)
+            col2_w = int(w * 0.34)
+            col3_w = w - col1_w - col2_w
+            self._render_browser_pane(2, 0, main_h, col1_w)
+            self._render_queue_pane(2, col1_w, main_h, col2_w)
+            self._render_art_pane(2, col1_w + col2_w, main_h, col3_w)
+        elif w >= 70:
+            half_w = w // 2
+            rem_w = w - half_w
+            self._render_browser_pane(2, 0, main_h, half_w)
+            if self.active_pane == 2:
+                self._render_art_pane(2, half_w, main_h, rem_w)
+            else:
+                self._render_queue_pane(2, half_w, main_h, rem_w)
         else:
             if self.active_pane == 0:
                 self._render_browser_pane(2, 0, main_h, w)
-            else:
+            elif self.active_pane == 1:
                 self._render_queue_pane(2, 0, main_h, w)
+            else:
+                self._render_art_pane(2, 0, main_h, w)
 
         # 3. Retro 1-Bit Spectrum Analyzer
         vis_y = 2 + main_h
@@ -431,7 +464,7 @@ class PulseApp:
         if w > len(title) + len(path_display) + 12:
             self._safe_addstr(0, len(title) + 2, path_display, curses.color_pair(2))
 
-        right_hint = "[?] HELP  [Q] QUIT "
+        right_hint = "[?] HELP  [1/2/3] PANES  [V] ART  [Q] QUIT "
         if w > len(title) + len(right_hint):
             self._safe_addstr(0, w - len(right_hint), right_hint, curses.color_pair(2) | curses.A_BOLD)
 
@@ -544,6 +577,84 @@ class PulseApp:
 
         self._safe_addstr(top + height - 1, left, "└" + ("─" * (width - 2)) + "┘", box_attr)
 
+    def _render_art_pane(self, top: int, left: int, height: int, width: int) -> None:
+        """Render dedicated 1-bit Album Art pane directly in the CLI."""
+        is_active = (self.active_pane == 2)
+        box_attr = curses.A_BOLD if is_active else curses.A_DIM
+
+        title = "┌─[ 3: ALBUM ART ]"
+        rem_w = max(0, width - len(title) - 1)
+        self._safe_addstr(top, left, f"{title}{'─' * rem_w}┐", box_attr)
+
+        content_h = height - 2
+        inner_w = width - 2
+
+        # Target track to display
+        target: Optional[TrackMetadata] = None
+        if self.active_pane == 0 and self.browser_items:
+            name, path, is_dir = self.browser_items[self.browser_cursor]
+            if not is_dir and path.suffix.lower() in (".mp3", ".flac"):
+                if path not in self._meta_cache:
+                    self._meta_cache[path] = TrackMetadata.from_path(path)
+                target = self._meta_cache[path]
+        elif self.active_pane == 1 and self.queue.tracks:
+            if 0 <= self.queue_cursor < len(self.queue.tracks):
+                target = self.queue.tracks[self.queue_cursor]
+
+        if not target:
+            target = self.queue.current_track
+
+        info_lines = 3 if content_h >= 8 else (2 if content_h >= 6 else 0)
+        art_h = max(2, content_h - info_lines - 1)
+        art_w = max(4, min(inner_w - 2, art_h * 2 + 4))
+
+        if target and target.has_cover:
+            art_lines = target.get_pixel_art(art_w, art_h)
+        else:
+            art_lines = TrackMetadata.empty_pixel_art(art_w, art_h)
+
+        pad_top = max(0, (content_h - len(art_lines) - info_lines) // 2)
+
+        row_offset = 0
+        for _ in range(pad_top):
+            row_y = top + 1 + row_offset
+            self._safe_addstr(row_y, left, "│" + (" " * inner_w) + "│", box_attr)
+            row_offset += 1
+
+        for art_l in art_lines:
+            if row_offset >= content_h:
+                break
+            row_y = top + 1 + row_offset
+            pad_l = max(0, (inner_w - len(art_l)) // 2)
+            pad_r = max(0, inner_w - len(art_l) - pad_l)
+            line_str = "│" + (" " * pad_l) + art_l + (" " * pad_r) + "│"
+            self._safe_addstr(row_y, left, line_str, curses.A_NORMAL)
+            row_offset += 1
+
+        if info_lines >= 2 and target and row_offset < content_h:
+            row_y = top + 1 + row_offset
+            self._safe_addstr(row_y, left, "│" + (" " * inner_w) + "│", box_attr)
+            row_offset += 1
+
+            if row_offset < content_h:
+                row_y = top + 1 + row_offset
+                t_title = f"{target.artist} - {target.title}"[:inner_w - 2]
+                self._safe_addstr(row_y, left, "│ " + t_title.center(inner_w - 2) + " │", curses.A_BOLD)
+                row_offset += 1
+
+            if row_offset < content_h and info_lines >= 3:
+                row_y = top + 1 + row_offset
+                fmt_tag = f"[{target.file_format} {target.bitrate}k / {target.sample_rate}Hz]"
+                self._safe_addstr(row_y, left, "│ " + fmt_tag.center(inner_w - 2) + " │", curses.A_DIM)
+                row_offset += 1
+
+        while row_offset < content_h:
+            row_y = top + 1 + row_offset
+            self._safe_addstr(row_y, left, "│" + (" " * inner_w) + "│", box_attr)
+            row_offset += 1
+
+        self._safe_addstr(top + height - 1, left, "└" + ("─" * (width - 2)) + "┘", box_attr)
+
     def _render_spectrum_box(self, top: int, left: int, height: int, width: int) -> None:
         """Render retro 1-bit hardware spectrum analyzer with bold bars and peak dots."""
         title = "┌─[ SPECTRUM ANALYZER ]"
@@ -635,9 +746,9 @@ class PulseApp:
 
         inner_h = max(2, height - 2)
 
-        # Show side-by-side cover thumbnail when height >= 5 and width >= 72
-        if height >= 5 and width >= 72:
-            art_w = 14
+        # Show side-by-side cover thumbnail when width >= 50 and height >= 4
+        if width >= 50 and height >= 4:
+            art_w = 12 if width < 80 else 14
             art_lines = track.get_pixel_art(art_w, inner_h) if track else TrackMetadata.empty_pixel_art(art_w, inner_h)
             info_w = max(10, width - 4 - art_w - 3)
 
@@ -769,43 +880,47 @@ class PulseApp:
             self._safe_addstr(top + 3, left + 3, f" {status_text} ", curses.A_BOLD)
 
     def _render_cover_modal(self, h: int, w: int) -> None:
-        """Render high-resolution 1-bit pixel art cover modal."""
+        """Render high-resolution 1-bit pixel art cover modal directly in the CLI."""
         track = self.cover_modal_track
         if not track:
             return
 
-        box_w = min(72, w - 4)
-        box_h = min(16, h - 4)
-        top = (h - box_h) // 2
-        left = (w - box_w) // 2
+        box_w = min(84, w - 2)
+        box_h = min(24, h - 2)
+        top = max(0, (h - box_h) // 2)
+        left = max(0, (w - box_w) // 2)
 
         for r in range(box_h):
             self._safe_addstr(top + r, left, " " * box_w, curses.color_pair(1))
 
         self._safe_addstr(top, left, "┌" + ("─" * (box_w - 2)) + "┐", curses.A_BOLD)
-        header_title = f" ■ ALBUM ART // {track.title[:24].upper()} "
+        header_title = f" ■ ALBUM ART // {track.title[:30].upper()} "
         self._safe_addstr(top + 1, left, "│ " + header_title + (" " * max(0, box_w - 4 - len(header_title))) + " │", curses.color_pair(2) | curses.A_BOLD)
         self._safe_addstr(top + 2, left, "├" + ("─" * (box_w - 2)) + "┤", curses.A_BOLD)
 
         inner_h = box_h - 4
-        art_w = min(22, max(12, box_w // 3))
+        art_w = min(36, max(14, int(box_w * 0.44)))
         lines = track.get_pixel_art(art_w, inner_h)
 
-        preview_notice = "• OPENED IN MACOS PREVIEW" if track.has_cover else "• NO COVER ATTACHED"
-        src_map = {"embedded": "SOURCE: EMBEDDED IN AUDIO", "folder": "SOURCE: ALBUM FOLDER ART", "online": "SOURCE: MATCHED ALBUM ART"}
-        source_notice = src_map.get(track.cover_source, "")
+        status_notice = "• 1-BIT MONOCHROME CLI RENDER" if track.has_cover else "• NO COVER ATTACHED"
+        src_map = {
+            "embedded": "SOURCE: EMBEDDED IN AUDIO TAGS",
+            "folder": "SOURCE: LOCAL ALBUM FOLDER ART",
+            "online": "SOURCE: ITUNES MUSIC CATALOG",
+        }
+        source_notice = src_map.get(track.cover_source, "SOURCE: NONE")
 
         details = [
-            f"TRACK:  {track.title}",
-            f"ARTIST: {track.artist}",
-            f"ALBUM:  {track.album}" + (f" ({track.year})" if track.year else ""),
-            f"GENRE:  {track.genre}" if track.genre else "",
-            f"FORMAT: {track.file_format} Lossless" if track.file_format == "FLAC" else f"FORMAT: {track.file_format}",
-            f"SPECS:  {track.sample_rate} Hz / {track.channels}",
-            f"RATE:   {track.bitrate} kbps",
+            f"TRACK:   {track.title}",
+            f"ARTIST:  {track.artist}",
+            f"ALBUM:   {track.album}" + (f" ({track.year})" if track.year else ""),
+            f"GENRE:   {track.genre}" if track.genre else "",
+            f"FORMAT:  {track.file_format} Lossless" if track.file_format == "FLAC" else f"FORMAT:  {track.file_format}",
+            f"SPECS:   {track.sample_rate} Hz / {track.channels}",
+            f"BITRATE: {track.bitrate} kbps",
             source_notice,
-            preview_notice,
-            "[ PRESS ANY KEY TO DISMISS ]",
+            status_notice,
+            "[ PRESS ANY KEY OR V TO CLOSE ]",
         ]
         active_details = [d for d in details if d != ""]
 
@@ -818,14 +933,15 @@ class PulseApp:
             self._safe_addstr(row_y, left, "│ ", curses.A_BOLD)
             self._safe_addstr(row_y, left + 2, art_line, curses.A_NORMAL)
             self._safe_addstr(row_y, left + 2 + art_w, " │ ", curses.A_DIM)
-            self._safe_addstr(row_y, left + 2 + art_w + 3, f"{det_line:<{avail_det}}"[:avail_det], curses.A_BOLD if "PRESS" in det_line or "OPENED" in det_line else curses.A_NORMAL)
+            is_highlight = "PRESS" in det_line or "CLI RENDER" in det_line
+            self._safe_addstr(row_y, left + 2 + art_w + 3, f"{det_line:<{avail_det}}"[:avail_det], curses.A_BOLD if is_highlight else curses.A_NORMAL)
             self._safe_addstr(row_y, left + box_w - 1, "│", curses.A_BOLD)
 
         self._safe_addstr(top + box_h - 1, left, "└" + ("─" * (box_w - 2)) + "┘", curses.A_BOLD)
 
     def _render_footer(self, y: int, width: int) -> None:
         """High-contrast solid pixel command bar."""
-        cmd_text = " [SPACE] PLAY/PAUSE  [ENTER] SELECT  [A] ADD  [TAB] PANE  [V] COVER  [←/→] SEEK  [+/-] VOL  [Q] QUIT "
+        cmd_text = " [SPACE] PLAY/PAUSE  [ENTER] SELECT  [A] ADD  [TAB] PANE  [V] EXPAND ART  [←/→] SEEK  [+/-] VOL  [Q] QUIT "
         self._safe_addstr(y, 0, " " * width, curses.color_pair(2))
         self._safe_addstr(y, 0, cmd_text[:width], curses.color_pair(2) | curses.A_BOLD)
 
@@ -849,14 +965,15 @@ class PulseApp:
             "  N / P          NEXT / PREV TRACK",
             "  R              CYCLE REPEAT (OFF -> TRACK -> QUEUE)",
             "  S              TOGGLE SHUFFLE",
-            "  V              VIEW COVER ART (IN-TERMINAL & PREVIEW)",
+            "  V              EXPAND ALBUM ART (FULL IN-CLI VIEW)",
             "",
             "NAVIGATION & LIBRARY:",
             "  J / K (UP/DN)  MOVE SELECTION",
             "  ENTER          OPEN DIR / PLAY FILE",
             "  BACKSPACE / H  ASCEND (PARENT DIRECTORY)",
             "  A              QUEUE FILE OR ENTIRE DIR",
-            "  TAB            SWITCH PANE (FILES <-> QUEUE)",
+            "  TAB            CYCLE PANE (FILES -> QUEUE -> ART)",
+            "  1 / 2 / 3      SELECT PANE DIRECTLY (1:FILES, 2:QUEUE, 3:ART)",
             "  /              ACTIVATE SEARCH FILTER",
             "  D / X          REMOVE TRACK FROM QUEUE",
             "  C              CLEAR ALL QUEUE ITEMS",

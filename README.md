@@ -23,10 +23,10 @@
 ## Features
 
 - **Lossless & Lossy Playback**: Native CoreAudio playback for both **FLAC** (lossless) and **MP3** files.
-- **Embedded Album Cover Art**:
-  - **In-Terminal 1-Bit Pixel Art**: Real-time Floyd-Steinberg dithered album cover thumbnails embedded directly in the player telemetry panel.
-  - **Full-Resolution macOS Preview (`V` key)**: Instant one-keystroke extraction to view the crystal-clear original cover artwork in macOS Preview.
-  - **Expanded Pixel Art Modal**: Full-screen high-resolution monochrome cover art viewer inside the terminal.
+- **Embedded Album Cover Art (Pure In-CLI)**:
+  - **Dedicated Album Art Pane (`[3: ALBUM ART]`)**: Live 1-bit monochrome pixel-art rendition of genuine embedded FLAC & MP3 artwork rendered directly in the TUI without leaving the terminal.
+  - **Telemetry Cover Thumbnail**: Real-time half-block dithered cover thumbnail embedded directly in the player telemetry panel.
+  - **Expanded In-CLI Modal (`V` key)**: Full-window high-resolution monochrome cover art viewer inside curses with audio stream telemetry and source identification (embedded, local folder, or catalog). Zero external GUI popups.
 - **Pure 1-Bit Monochrome Design**: Authentic high-contrast black-and-white curses aesthetics with zero ANSI color slop or pseudo-GUI web bloat.
 - **Live Hardware Spectrum Analyzer**: Real-time frequency response visualization with peak-hold dot indicators at 25 FPS.
 - **Vim & POSIX Keybindings**: Seamless navigation with `hjkl`, `Space`, and standard terminal shortcuts.
@@ -92,12 +92,13 @@ The application operates entirely within the terminal using standard POSIX and V
 | **Next / Previous Track** | `N` / `P` |
 | **Cycle Repeat Mode** | `R` *(Off → Track → Queue)* |
 | **Toggle Shuffle Mode** | `S` *(On / Off)* |
-| **View Cover Art** | `V` *(Opens hi-res in Preview + expanded terminal modal)* |
+| **View / Expand Cover Art** | `V` *(Opens full in-CLI pixel art modal)* |
 | **Navigate Selection** | `j` / `k` (or `Up` / `Down`) |
 | **Open Folder / Play File** | `Enter` (or `l`) |
 | **Ascend to Parent Folder** | `Backspace` (or `h`) |
 | **Add to Playlist Queue** | `A` *(Enqueues file or entire directory)* |
-| **Switch Focus Panes** | `Tab` *(Files `[1]` ↔ Queue `[2]`)* |
+| **Switch Focus Panes** | `Tab` *(Cycles Files `[1]` → Queue `[2]` → Album Art `[3]`)* |
+| **Direct Pane Select** | `1`, `2`, `3` *(Jump directly to Files, Queue, or Art)* |
 | **Search Filter** | `/` *(Type to filter, `Enter` to confirm, `Esc` to clear)* |
 | **Remove from Queue** | `D` / `X` |
 | **Clear Queue** | `C` |
@@ -113,12 +114,12 @@ The application operates entirely within the terminal using standard POSIX and V
 |                      POSIX Terminal Display Engine                            |
 |                  (Curses Double-Buffered Grid: 25 Hz)                         |
 |                                                                               |
-|  +-------------------------------------+  +--------------------------------+  |
-|  |  [1: FILES]                         |  |  [2: QUEUE]                    |  |
-|  |  - Direct Inode Navigation (../)    |  |  - Sequential / Shuffle Model  |  |
-|  |  - MP3 & FLAC Filtering             |  |  - Direct Index Traversal      |  |
-|  |  - Instant Substring Search (/)     |  |  - Track Scrubber Accounting   |  |
-|  +-------------------------------------+  +--------------------------------+  |
+|  +-----------------------+  +-----------------------+  +---------------------+  |
+|  |  [1: FILES]           |  |  [2: QUEUE]           |  |  [3: ALBUM ART]     |  |
+|  |  - Inode Navigation   |  |  - Playlist Ordering  |  |  - Live 1-Bit Pixel |  |
+|  |  - FLAC & MP3 Filter  |  |  - Track Indexing     |  |  - Embedded Covers  |  |
+|  |  - Fast Search (/)    |  |  - Queue Accounting   |  |  - Dynamic Dither   |  |
+|  +-----------------------+  +-----------------------+  +---------------------+  |
 |                                                                               |
 |  +-------------------------------------------------------------------------+  |
 |  |  Dynamic Spectral Equalizer (Real-Time Unicode Discrete Block Array)    |  |
