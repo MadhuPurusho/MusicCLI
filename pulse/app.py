@@ -1,4 +1,4 @@
-"""Pure Unix terminal interface for Pulse CLI using standard curses."""
+"""Pure Black and White 1-Bit Pixel-Art Curses Interface for Pulse CLI."""
 
 from __future__ import annotations
 
@@ -15,15 +15,16 @@ from pulse.queue_manager import QueueManager, RepeatMode
 
 
 class PulseApp:
-    """Pure terminal curses music player and library explorer."""
+    """1-Bit Monochrome Pixel-Art Terminal Audio Station."""
 
+    # 1-Bit dithering & block characters
+    DITHER = [" ", "░", "▒", "▓", "█"]
     BLOCKS = [" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
 
     def __init__(self, initial_path: Optional[Path | str] = None, auto_play_file: Optional[Path | str] = None):
         self.initial_path = Path(initial_path).resolve() if initial_path else None
         self.auto_play_file = Path(auto_play_file).resolve() if auto_play_file else None
 
-        # Resolve starting directory
         if self.initial_path and self.initial_path.is_dir():
             self.current_dir = self.initial_path
         elif self.auto_play_file:
@@ -36,23 +37,26 @@ class PulseApp:
         self.queue = QueueManager()
 
         # Browser state
-        self.browser_items: List[Tuple[str, Path, bool]] = []  # (display_name, path, is_dir)
+        self.browser_items: List[Tuple[str, Path, bool]] = []
         self.browser_cursor: int = 0
         self.browser_scroll: int = 0
         self.filter_query: str = ""
         self.is_filtering: bool = False
 
-        # Queue view state
+        # Queue state
         self.queue_cursor: int = 0
         self.queue_scroll: int = 0
 
-        # Active pane: 0 = Browser, 1 = Queue
+        # Pane focus: 0 = Browser, 1 = Queue
         self.active_pane: int = 0
         self.show_help: bool = False
         self.status_message: str = ""
         self.status_time: float = 0.0
 
-        # Initial populate
+        # Spectrum peak-hold state for retro 1-bit hardware meters
+        self.peak_levels: List[float] = [0.0] * 64
+        self.peak_hold_frames: List[int] = [0] * 64
+
         self._load_directory(self.current_dir)
 
         if self.auto_play_file and self.auto_play_file.exists():
@@ -70,9 +74,8 @@ class PulseApp:
         self.current_dir = path.resolve()
         items: List[Tuple[str, Path, bool]] = []
 
-        # Add parent directory entry if not at root
         if self.current_dir.parent != self.current_dir:
-            items.append((".. (parent directory)", self.current_dir.parent, True))
+            items.append(("..", self.current_dir.parent, True))
 
         dirs: List[Tuple[str, Path, bool]] = []
         files: List[Tuple[str, Path, bool]] = []
@@ -91,7 +94,7 @@ class PulseApp:
                 elif entry.is_file() and entry.suffix.lower() == ".mp3":
                     files.append((name, entry, False))
         except (PermissionError, OSError):
-            self.set_status(f"Permission denied: {self.current_dir}")
+            self.set_status(f"ERR: ACCESS DENIED: {self.current_dir}")
 
         dirs.sort(key=lambda x: x[0].lower())
         files.sort(key=lambda x: x[0].lower())
@@ -101,38 +104,26 @@ class PulseApp:
         self.browser_scroll = 0
 
     def run(self) -> None:
-        """Launch curses wrapper."""
         try:
             curses.wrapper(self._main_loop)
         finally:
             self.audio.close()
 
     def _init_colors(self) -> None:
-        """Configure curses terminal color palette."""
+        """Enforce strict high-contrast monochrome (Black & White)."""
         curses.start_color()
-        try:
-            curses.use_default_colors()
-            bg = -1
-        except Exception:
-            bg = curses.COLOR_BLACK
-
-        curses.init_pair(1, curses.COLOR_CYAN, bg)      # Accent / Primary
-        curses.init_pair(2, curses.COLOR_GREEN, bg)     # Playing / Success
-        curses.init_pair(3, curses.COLOR_YELLOW, bg)    # Directories / Warnings
-        curses.init_pair(4, curses.COLOR_MAGENTA, bg)   # Metadata
-        curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE)   # Active cursor
-        curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_CYAN)   # Top/Bottom status bar
-        curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Inactive cursor
+        # Pair 1: Normal White on Black
+        curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLACK)
+        # Pair 2: Reverse Inverted Black on White (1-Bit Solid Highlight)
+        curses.init_pair(2, curses.COLOR_BLACK, curses.COLOR_WHITE)
 
     def _main_loop(self, stdscr) -> None:
-        """Main curses event and redraw loop."""
         self.stdscr = stdscr
         curses.curs_set(0)
-        stdscr.timeout(40)  # 25 FPS non-blocking polling
+        stdscr.timeout(40)  # 25 FPS update rate
         self._init_colors()
 
         while True:
-            # Check for track auto-advancement
             if self.audio.check_and_clear_finished():
                 next_t = self.queue.next_track()
                 if next_t:
@@ -140,10 +131,8 @@ class PulseApp:
                 else:
                     self.audio.stop()
 
-            # Render screen frame
             self._render()
 
-            # Process input
             try:
                 ch = stdscr.getch()
             except Exception:
@@ -154,7 +143,6 @@ class PulseApp:
                     break
 
     def _handle_input(self, ch: int) -> bool:
-        """Handle key input. Return False to exit."""
         if self.show_help:
             self.show_help = False
             return True
@@ -162,7 +150,6 @@ class PulseApp:
         if self.is_filtering:
             return self._handle_filter_input(ch)
 
-        # Global navigation & shortcuts
         if ch in (ord('q'), ord('Q')):
             return False
 
@@ -181,40 +168,36 @@ class PulseApp:
                 self.audio.toggle_play_pause()
 
         elif ch == ord('\t'):
-            # Toggle between Browser (0) and Queue (1)
             self.active_pane = 1 - self.active_pane
 
-        elif ch in (ord('/'), ):
+        elif ch == ord('/'):
             self.is_filtering = True
             self.filter_query = ""
 
-        # Volume controls (+ / - / [ / ])
         elif ch in (ord('+'), ord('='), ord(']')):
             vol = self.audio.change_volume(0.05)
-            self.set_status(f"Volume: {int(vol * 100)}%")
+            self.set_status(f"VOL: {int(vol * 100)}%")
 
         elif ch in (ord('-'), ord('_'), ord('[')):
             vol = self.audio.change_volume(-0.05)
-            self.set_status(f"Volume: {int(vol * 100)}%")
+            self.set_status(f"VOL: {int(vol * 100)}%")
 
         elif ch in (ord('m'), ord('M')):
             muted = self.audio.toggle_mute()
-            self.set_status("Muted" if muted else f"Unmuted ({int(self.audio.volume * 100)}%)")
+            self.set_status("AUDIO: MUTED" if muted else f"AUDIO: {int(self.audio.volume * 100)}%")
 
-        # Seeking (Left / Right or , / .)
         elif ch in (curses.KEY_LEFT, ord(',')):
             self.audio.seek(-5.0)
 
         elif ch in (curses.KEY_RIGHT, ord('.')):
             self.audio.seek(5.0)
 
-        # Track skipping
         elif ch in (ord('n'), ord('N')):
             next_t = self.queue.next_track()
             if next_t:
                 self.audio.load_track(next_t)
             else:
-                self.set_status("End of queue reached")
+                self.set_status("QUEUE: END REACHED")
 
         elif ch in (ord('p'), ord('P')):
             prev_t = self.queue.prev_track()
@@ -223,13 +206,12 @@ class PulseApp:
 
         elif ch in (ord('r'), ord('R')):
             mode = self.queue.toggle_repeat()
-            self.set_status(f"{mode.label}")
+            self.set_status(f"LOOP: {mode.name}")
 
         elif ch in (ord('s'), ord('S')):
             shuf = self.queue.toggle_shuffle()
-            self.set_status(f"Shuffle: {'On' if shuf else 'Off'}")
+            self.set_status(f"SHUFFLE: {'ON' if shuf else 'OFF'}")
 
-        # Pane-specific inputs
         if self.active_pane == 0:
             self._handle_browser_input(ch)
         else:
@@ -238,11 +220,10 @@ class PulseApp:
         return True
 
     def _handle_filter_input(self, ch: int) -> bool:
-        """Handle input while live search filter prompt is active."""
         if ch in (10, 13, curses.KEY_ENTER):
             self.is_filtering = False
             self._load_directory(self.current_dir)
-        elif ch in (27, ):  # Escape
+        elif ch == 27:  # Escape
             self.is_filtering = False
             self.filter_query = ""
             self._load_directory(self.current_dir)
@@ -255,7 +236,6 @@ class PulseApp:
         return True
 
     def _handle_browser_input(self, ch: int) -> None:
-        """Handle cursor and actions inside File Browser pane."""
         count = len(self.browser_items)
         if count == 0:
             if ch in (curses.KEY_BACKSPACE, 127, 8, ord('h')):
@@ -265,23 +245,16 @@ class PulseApp:
 
         if ch in (curses.KEY_UP, ord('k')):
             self.browser_cursor = max(0, self.browser_cursor - 1)
-
         elif ch in (curses.KEY_DOWN, ord('j')):
             self.browser_cursor = min(count - 1, self.browser_cursor + 1)
-
-        elif ch == curses.KEY_PPAGE:  # Page Up
+        elif ch == curses.KEY_PPAGE:
             self.browser_cursor = max(0, self.browser_cursor - 10)
-
-        elif ch == curses.KEY_NPAGE:  # Page Down
+        elif ch == curses.KEY_NPAGE:
             self.browser_cursor = min(count - 1, self.browser_cursor + 10)
-
         elif ch in (curses.KEY_BACKSPACE, 127, 8, ord('h')):
-            # Ascend to parent directory
             if self.current_dir.parent != self.current_dir:
                 self._load_directory(self.current_dir.parent)
-
         elif ch in (10, 13, curses.KEY_ENTER, ord('l')):
-            # Open directory or play file
             name, path, is_dir = self.browser_items[self.browser_cursor]
             if is_dir:
                 self._load_directory(path)
@@ -290,22 +263,19 @@ class PulseApp:
                 idx = self.queue.add_track(meta)
                 self.queue.current_index = idx
                 self.audio.load_track(meta)
-
         elif ch in (ord('a'), ord('A')):
-            # Add file or directory to queue
             name, path, is_dir = self.browser_items[self.browser_cursor]
             if is_dir:
                 added = 0
                 for f in sorted(list(path.glob("*.mp3")) + list(path.glob("*.MP3"))):
                     self.queue.add_track(TrackMetadata.from_path(f))
                     added += 1
-                self.set_status(f"Added {added} tracks from {path.name}/ to queue")
+                self.set_status(f"QUEUED: {added} TRACKS ({path.name}/)")
             else:
                 meta = TrackMetadata.from_path(path)
                 self.queue.add_track(meta)
-                self.set_status(f"Added: {meta.title}")
+                self.set_status(f"QUEUED: {meta.title}")
 
-            # If stopped and empty, play immediately
             if self.audio.state == AudioState.STOPPED and self.queue.current_index < 0:
                 self.queue.current_index = 0
                 t = self.queue.current_track
@@ -313,41 +283,35 @@ class PulseApp:
                     self.audio.load_track(t)
 
     def _handle_queue_input(self, ch: int) -> None:
-        """Handle cursor and actions inside Queue pane."""
         count = self.queue.count
         if count == 0:
             return
 
         if ch in (curses.KEY_UP, ord('k')):
             self.queue_cursor = max(0, self.queue_cursor - 1)
-
         elif ch in (curses.KEY_DOWN, ord('j')):
             self.queue_cursor = min(count - 1, self.queue_cursor + 1)
-
         elif ch in (10, 13, curses.KEY_ENTER):
             track = self.queue.jump_to(self.queue_cursor)
             if track:
                 self.audio.load_track(track)
-
         elif ch in (ord('d'), ord('x'), curses.KEY_DC):
             removed = self.queue.remove_at(self.queue_cursor)
             if removed:
-                self.set_status(f"Removed: {removed.title}")
+                self.set_status(f"REMOVED: {removed.title}")
             self.queue_cursor = min(self.queue_cursor, max(0, self.queue.count - 1))
-
         elif ch in (ord('c'), ord('C')):
             self.queue.clear()
             self.audio.stop()
             self.queue_cursor = 0
-            self.set_status("Queue cleared")
+            self.set_status("QUEUE: CLEARED")
 
     def _render(self) -> None:
-        """Render complete terminal screen layout."""
         self.stdscr.erase()
         h, w = self.stdscr.getmaxyx()
 
-        if h < 14 or w < 40:
-            self._safe_addstr(0, 0, "Terminal window too small. Resize to at least 80x24.")
+        if h < 16 or w < 60:
+            self._safe_addstr(0, 0, "TERMINAL SIZE TOO SMALL. MIN: 80x24", curses.A_BOLD)
             self.stdscr.refresh()
             return
 
@@ -356,41 +320,36 @@ class PulseApp:
             self.stdscr.refresh()
             return
 
-        # 1. Header Bar (Row 0)
+        # 1. Top Header Box
         self._render_header(w)
 
-        # 2. Split Main View (Rows 1 to H - 7)
-        main_h = h - 7
+        # 2. Main File & Queue Split View
+        main_h = h - 11
         if w >= 80:
             left_w = w // 2
             right_w = w - left_w
-            self._render_browser_pane(1, 0, main_h, left_w)
-            self._render_queue_pane(1, left_w, main_h, right_w)
+            self._render_browser_pane(2, 0, main_h, left_w)
+            self._render_queue_pane(2, left_w, main_h, right_w)
         else:
             if self.active_pane == 0:
-                self._render_browser_pane(1, 0, main_h, w)
+                self._render_browser_pane(2, 0, main_h, w)
             else:
-                self._render_queue_pane(1, 0, main_h, w)
+                self._render_queue_pane(2, 0, main_h, w)
 
-        # 3. Separator (Row H - 7)
-        self._safe_addstr(h - 7, 0, "─" * w, curses.color_pair(1))
+        # 3. Retro 1-Bit Spectrum Analyzer
+        vis_y = 2 + main_h
+        self._render_spectrum_box(vis_y, 0, 4, w)
 
-        # 4. Live Spectrum Visualizer (Rows H - 6 to H - 4)
-        self._render_visualizer(h - 6, 0, 3, w)
+        # 4. Playback Scrubber & Telemetry Box
+        tele_y = vis_y + 4
+        self._render_telemetry_box(tele_y, 0, 4, w)
 
-        # 5. Playback & Progress Status (Row H - 3)
-        self._render_playback_line(h - 3, w)
-
-        # 6. Status / Messages (Row H - 2)
-        self._render_status_line(h - 2, w)
-
-        # 7. Hotkey Bar (Row H - 1)
+        # 5. Bottom Solid Command Strip
         self._render_footer(h - 1, w)
 
         self.stdscr.refresh()
 
     def _safe_addstr(self, y: int, x: int, text: str, attr: int = 0) -> None:
-        """Safely write string inside terminal boundaries."""
         h, w = self.stdscr.getmaxyx()
         if y < 0 or y >= h or x < 0 or x >= w:
             return
@@ -403,29 +362,37 @@ class PulseApp:
             pass
 
     def _render_header(self, w: int) -> None:
-        """Render top system header bar."""
-        path_str = str(self.current_dir)
-        header_text = f" PULSE CLI ── {path_str} "
-        self._safe_addstr(0, 0, " " * w, curses.color_pair(6))
-        self._safe_addstr(0, 0, header_text, curses.color_pair(6) | curses.A_BOLD)
-        help_hint = "[?] Help  [q] Quit "
-        if w > len(header_text) + len(help_hint):
-            self._safe_addstr(0, w - len(help_hint), help_hint, curses.color_pair(6))
+        """Sharp pixel-art title bar."""
+        bar = " " * w
+        self._safe_addstr(0, 0, bar, curses.color_pair(2))
+        title = " ■ PULSE // AUDIO ENGINE 1.0 "
+        self._safe_addstr(0, 0, title, curses.color_pair(2) | curses.A_BOLD)
+
+        path_display = f" {self.current_dir} "
+        if w > len(title) + len(path_display) + 12:
+            self._safe_addstr(0, len(title) + 2, path_display, curses.color_pair(2))
+
+        right_hint = "[?] HELP  [Q] QUIT "
+        if w > len(title) + len(right_hint):
+            self._safe_addstr(0, w - len(right_hint), right_hint, curses.color_pair(2) | curses.A_BOLD)
+
+        # Divider line
+        self._safe_addstr(1, 0, "─" * w, curses.A_DIM)
 
     def _render_browser_pane(self, top: int, left: int, height: int, width: int) -> None:
-        """Render file browser directory tree."""
+        """Render 1-bit pixel box for file browser."""
         is_active = (self.active_pane == 0)
-        border_attr = curses.color_pair(1) | curses.A_BOLD if is_active else curses.A_DIM
+        box_attr = curses.A_BOLD if is_active else curses.A_DIM
 
-        # Header title
-        filter_str = f" [Filter: {self.filter_query}]" if self.filter_query else ""
-        title = f" [1: FILES ({len(self.browser_items)}){filter_str}] "
-        self._safe_addstr(top, left, title, border_attr)
+        # Frame Header
+        filt = f" [QUERY: {self.filter_query}]" if self.filter_query else ""
+        title = f"┌─[ 1: FILES {filt}]"
+        rem_w = max(0, width - len(title) - 1)
+        self._safe_addstr(top, left, f"{title}{'─' * rem_w}┐", box_attr)
 
-        content_h = height - 1
+        content_h = height - 2
         count = len(self.browser_items)
 
-        # Adjust scroll offset to keep cursor in view
         if self.browser_cursor < self.browser_scroll:
             self.browser_scroll = self.browser_cursor
         elif self.browser_cursor >= self.browser_scroll + content_h:
@@ -440,37 +407,36 @@ class PulseApp:
                 is_selected = (item_idx == self.browser_cursor)
 
                 if is_selected and is_active:
-                    attr = curses.color_pair(5) | curses.A_BOLD
+                    attr = curses.color_pair(2) | curses.A_BOLD  # Solid white highlight
+                    marker = "▶ "
                 elif is_selected:
-                    attr = curses.color_pair(7) | curses.A_BOLD
-                elif is_dir:
-                    attr = curses.color_pair(3) | curses.A_BOLD  # Yellow for folders
+                    attr = curses.A_BOLD
+                    marker = "▷ "
                 else:
-                    attr = curses.color_pair(1)                  # Cyan for MP3s
+                    attr = curses.A_NORMAL
+                    marker = "  "
 
-                prefix = "> " if is_selected else "  "
-                display = f"{prefix}{name}"
-                # Pad to fill line
-                line_str = f"{display:<{width - 2}}"
-                self._safe_addstr(row_y, left, line_str, attr)
+                tag = "[DIR] " if is_dir else "[MP3] "
+                entry_str = f"{marker}{tag}{name}"
+                fill_len = width - 4
+                self._safe_addstr(row_y, left, "│ ", box_attr)
+                self._safe_addstr(row_y, left + 2, f"{entry_str:<{fill_len}}", attr)
+                self._safe_addstr(row_y, left + width - 1, "│", box_attr)
             else:
-                self._safe_addstr(row_y, left, " " * (width - 1))
+                self._safe_addstr(row_y, left, "│" + (" " * (width - 2)) + "│", box_attr)
 
-        # Vertical divider line on right if side-by-side
-        if left + width < self.stdscr.getmaxyx()[1]:
-            for r in range(height):
-                self._safe_addstr(top + r, left + width - 1, "│", curses.A_DIM)
+        self._safe_addstr(top + height - 1, left, "└" + ("─" * (width - 2)) + "┘", box_attr)
 
     def _render_queue_pane(self, top: int, left: int, height: int, width: int) -> None:
-        """Render interactive queue / playlist table."""
+        """Render 1-bit pixel box for queue."""
         is_active = (self.active_pane == 1)
-        border_attr = curses.color_pair(1) | curses.A_BOLD if is_active else curses.A_DIM
+        box_attr = curses.A_BOLD if is_active else curses.A_DIM
 
-        # Header title
-        title = f" [2: QUEUE ({self.queue.count} tracks)] "
-        self._safe_addstr(top, left, title, border_attr)
+        title = f"┌─[ 2: QUEUE ({self.queue.count}) ]"
+        rem_w = max(0, width - len(title) - 1)
+        self._safe_addstr(top, left, f"{title}{'─' * rem_w}┐", box_attr)
 
-        content_h = height - 1
+        content_h = height - 2
         count = self.queue.count
 
         if self.queue_cursor < self.queue_scroll:
@@ -488,147 +454,196 @@ class PulseApp:
                 is_playing = (item_idx == self.queue.current_index)
 
                 if is_selected and is_active:
-                    attr = curses.color_pair(5) | curses.A_BOLD
-                elif is_selected:
-                    attr = curses.color_pair(7) | curses.A_BOLD
-                elif is_playing:
                     attr = curses.color_pair(2) | curses.A_BOLD
+                    marker = "▶ "
+                elif is_selected:
+                    attr = curses.A_BOLD
+                    marker = "▷ "
+                elif is_playing:
+                    attr = curses.A_BOLD
+                    marker = "■ "
                 else:
                     attr = curses.A_NORMAL
+                    marker = "  "
 
-                state_icon = "▶" if is_playing else " "
-                num_str = f"{item_idx + 1:2d}."
-                dur_str = track.formatted_duration
-                max_title_len = max(10, width - 18)
-                title_str = track.title[:max_title_len]
+                dur = track.formatted_duration
+                num_str = f"{item_idx + 1:02d}. "
+                avail_title = max(8, width - 18)
+                title_str = track.title[:avail_title]
+                entry_str = f"{marker}{num_str}{title_str:<{avail_title}} {dur:>6s}"
 
-                line = f" {state_icon} {num_str} {title_str:<{max_title_len}} {dur_str:>6s} "
-                self._safe_addstr(row_y, left, f"{line:<{width}}", attr)
+                self._safe_addstr(row_y, left, "│ ", box_attr)
+                self._safe_addstr(row_y, left + 2, f"{entry_str:<{width - 4}}", attr)
+                self._safe_addstr(row_y, left + width - 1, "│", box_attr)
             else:
-                self._safe_addstr(row_y, left, " " * width)
+                self._safe_addstr(row_y, left, "│" + (" " * (width - 2)) + "│", box_attr)
 
-    def _render_visualizer(self, top: int, left: int, height: int, width: int) -> None:
-        """Render multi-band dynamic spectrum equalizer."""
-        levels = self.audio.get_visualizer_levels()
+        self._safe_addstr(top + height - 1, left, "└" + ("─" * (width - 2)) + "┘", box_attr)
+
+    def _render_spectrum_box(self, top: int, left: int, height: int, width: int) -> None:
+        """Render retro 1-bit hardware spectrum analyzer with peak dots."""
+        title = "┌─[ SPECTRUM ANALYZER ]"
+        rem_w = max(0, width - len(title) - 1)
+        self._safe_addstr(top, left, f"{title}{'─' * rem_w}┐", curses.A_NORMAL)
+
+        raw_levels = self.audio.get_visualizer_levels()
         is_playing = (self.audio.state == AudioState.PLAYING)
+        plot_h = height - 2  # internal rows
 
-        num_bars = min(len(levels), width // 2)
-        if num_bars <= 0:
-            return
+        # Calculate columns (each bar width: 2 chars)
+        inner_w = width - 4
+        num_bars = min(len(raw_levels), inner_w // 2)
 
-        for row in range(height):
-            y = top + row
-            line_row = height - 1 - row  # from bottom to top
-            row_chars = []
+        # Update peak hold decay
+        for b in range(num_bars):
+            lvl = raw_levels[b] if is_playing else 0.04
+            if lvl >= self.peak_levels[b]:
+                self.peak_levels[b] = lvl
+                self.peak_hold_frames[b] = 8
+            else:
+                if self.peak_hold_frames[b] > 0:
+                    self.peak_hold_frames[b] -= 1
+                else:
+                    self.peak_levels[b] = max(0.0, self.peak_levels[b] - 0.08)
+
+        for row in range(plot_h):
+            row_y = top + 1 + row
+            line_row = plot_h - 1 - row  # 0 is bottom row, plot_h-1 is top row
+            row_cells = []
 
             for b in range(num_bars):
-                val = levels[b] if is_playing else 0.05
-                bar_h = val * height
+                val = raw_levels[b] if is_playing else 0.04
+                bar_h = val * plot_h
                 fill = bar_h - line_row
 
+                # Peak hold dot
+                peak_row = int(self.peak_levels[b] * plot_h)
+                is_peak = (peak_row == line_row and peak_row > 0)
+
                 if fill >= 1.0:
-                    char = self.BLOCKS[8]
+                    char = "█"
                 elif fill > 0.0:
                     char = self.BLOCKS[min(8, max(0, int(fill * 8)))]
+                elif is_peak:
+                    char = "▀"
                 else:
                     char = " "
-                row_chars.append(f"{char} ")
+                row_cells.append(f"{char} ")
 
-            spectrum_line = "".join(row_chars)
-            # Center visualizer
-            pad = max(0, (width - len(spectrum_line)) // 2)
-            color = curses.color_pair(2) if line_row == 0 else curses.color_pair(1)
-            self._safe_addstr(y, pad, spectrum_line, color | curses.A_BOLD)
+            spectrum_line = "".join(row_cells)
+            pad_left = max(0, (inner_w - len(spectrum_line)) // 2)
+            pad_right = max(0, inner_w - len(spectrum_line) - pad_left)
+            full_line = "│ " + (" " * pad_left) + spectrum_line + (" " * pad_right) + " │"
+            self._safe_addstr(row_y, left, full_line, curses.A_BOLD if line_row == 0 else curses.A_NORMAL)
 
-    def _render_playback_line(self, y: int, width: int) -> None:
-        """Render Now Playing track details, time scrubber, and bitrate."""
+        self._safe_addstr(top + height - 1, left, "└" + ("─" * (width - 2)) + "┘", curses.A_NORMAL)
+
+    def _render_telemetry_box(self, top: int, left: int, height: int, width: int) -> None:
+        """Render 1-bit pixel playback telemetry, dithered progress, and mode meters."""
+        self._safe_addstr(top, left, "┌─[ TELEMETRY ]" + ("─" * (width - 16)) + "┐", curses.A_NORMAL)
+
         track = self.queue.current_track
         curr_sec, tot_sec, pct = self.audio.get_progress()
 
+        # Row 1: Track title and format info
         if track:
-            state_str = "PLAYING" if self.audio.state == AudioState.PLAYING else "PAUSED"
+            state_tag = "[PLAY]" if self.audio.state == AudioState.PLAYING else "[PAUSE]"
             if self.audio.state == AudioState.STOPPED:
-                state_str = "STOPPED"
+                state_tag = "[STOP]"
 
-            state_color = curses.color_pair(2) if state_str == "PLAYING" else curses.color_pair(3)
-            title = f"{track.artist} - {track.title}" if track.artist != "Unknown Artist" else track.title
-            curr_str = format_duration(curr_sec)
-            tot_str = format_duration(tot_sec)
-
-            # High resolution scrubber bar
-            bar_w = max(10, min(30, width - 60))
-            if tot_sec > 0:
-                pos = int((curr_sec / tot_sec) * (bar_w - 1))
-                bar_str = "=" * pos + ">" + "-" * (bar_w - 1 - pos)
-            else:
-                bar_str = "-" * bar_w
-
-            line = f" [{state_str}] {title}   {curr_str} / {tot_str} [{bar_str}] ({pct:4.1f}%)"
-            if track.bitrate > 0:
-                line += f"  {track.bitrate}k"
-            self._safe_addstr(y, 0, f"{line:<{width}}", curses.A_BOLD)
+            artist_title = f"{track.artist} - {track.title}" if track.artist != "Unknown Artist" else track.title
+            specs = f"[{track.bitrate}k / {track.channels.upper()}]"
+            avail_w = width - len(state_tag) - len(specs) - 6
+            t_str = artist_title[:avail_w]
+            line1 = f"│ {state_tag} {t_str:<{avail_w}} {specs} │"
         else:
-            self._safe_addstr(y, 0, f" [STOPPED] No track loaded. Select an MP3 to play.{' ':<{width}}", curses.A_DIM)
+            line1 = f"│ [IDLE] NO TRACK LOADED.{' ' * (width - 27)}│"
 
-    def _render_status_line(self, y: int, width: int) -> None:
-        """Render volume, loop/shuffle mode, and flash messages."""
-        if self.is_filtering:
-            prompt = f" Search Filter: {self.filter_query}_  (Press Enter to confirm, Esc to clear)"
-            self._safe_addstr(y, 0, f"{prompt:<{width}}", curses.color_pair(3) | curses.A_BOLD)
-            return
+        self._safe_addstr(top + 1, left, line1, curses.A_BOLD)
 
+        # Row 2: 1-Bit Dithered Scrubber Bar
+        curr_str = format_duration(curr_sec)
+        tot_str = format_duration(tot_sec)
+        rem_sec = max(0.0, tot_sec - curr_sec)
+        rem_str = f"-{format_duration(rem_sec)}"
+
+        time_pre = f"{curr_str} ["
+        time_post = f"] {tot_str} ({rem_str}) {pct:5.1f}%"
+        fixed_len = len(time_pre) + len(time_post) + 4
+        bar_w = max(10, width - fixed_len)
+
+        if tot_sec > 0:
+            filled_len = int((curr_sec / tot_sec) * bar_w)
+            # 1-bit dithered fill: solid pixel body with dithered lead
+            dither_len = min(2, filled_len)
+            solid_len = max(0, filled_len - dither_len)
+            empty_len = max(0, bar_w - filled_len)
+            bar_chars = ("█" * solid_len) + ("▓" * dither_len) + ("░" * empty_len)
+        else:
+            bar_chars = "░" * bar_w
+
+        line2 = f"│ {time_pre}{bar_chars}{time_post}{' ' * max(0, width - fixed_len - bar_w)} │"
+        self._safe_addstr(top + 2, left, line2, curses.A_NORMAL)
+
+        # Row 3: Status / Mode meters & message
         now = time.time()
-        if self.status_message and (now - self.status_time < 3.0):
-            self._safe_addstr(y, 0, f" >>> {self.status_message}{' ':<{width}}", curses.color_pair(2) | curses.A_BOLD)
-            return
+        if self.is_filtering:
+            status_text = f"QUERY: {self.filter_query}_ [ENTER: CONFIRM  ESC: CANCEL]"
+        elif self.status_message and (now - self.status_time < 3.0):
+            status_text = f"STATUS >> {self.status_message}"
+        else:
+            vol_lvl = int(self.audio.volume * 10)
+            vol_bar = ("█" * vol_lvl) + ("░" * (10 - vol_lvl))
+            vol_str = f"VOL:[{vol_bar}]"
+            rep_str = f"LOOP:{self.queue.repeat_mode.name}"
+            shuf_str = f"SHUF:{'ON' if self.queue.is_shuffled else 'OFF'}"
+            track_num = f"TRK:{self.queue.current_index + 1:02d}/{self.queue.count:02d}" if self.queue.count else "TRK:--/--"
+            status_text = f"{vol_str}  │  {rep_str}  │  {shuf_str}  │  {track_num}"
 
-        vol_str = "MUTED" if self.audio.is_muted else f"{int(self.audio.volume * 100)}%"
-        rep_str = self.queue.repeat_mode.label
-        shuf_str = "On" if self.queue.is_shuffled else "Off"
-        status = f" Volume: {vol_str}  │  {rep_str}  │  Shuffle: {shuf_str}"
-        self._safe_addstr(y, 0, f"{status:<{width}}", curses.A_NORMAL)
+        self._safe_addstr(top + 3, left, "└" + ("─" * (width - 2)) + "┘", curses.A_NORMAL)
+        # Overlay status inside frame
+        self._safe_addstr(top + 3, left + 3, f" {status_text} ", curses.A_BOLD)
 
     def _render_footer(self, y: int, width: int) -> None:
-        """Render bottom command shortcuts reference line."""
-        shortcuts = " [Space] Pause  [Enter] Play  [a] Add  [Tab] Pane  [h/l] Nav  [<-/->] Seek  [+/-] Vol  [?] Help  [q] Quit "
-        self._safe_addstr(y, 0, " " * width, curses.color_pair(6))
-        self._safe_addstr(y, 0, shortcuts[:width], curses.color_pair(6) | curses.A_BOLD)
+        """High-contrast solid pixel command bar."""
+        cmd_text = " [SPACE] PLAY/PAUSE  [ENTER] OPEN/PLAY  [A] ADD  [TAB] PANE  [←/→] SEEK  [+/-] VOL  [Q] QUIT "
+        self._safe_addstr(y, 0, " " * width, curses.color_pair(2))
+        self._safe_addstr(y, 0, cmd_text[:width], curses.color_pair(2) | curses.A_BOLD)
 
     def _render_help_screen(self, h: int, w: int) -> None:
-        """Render internal keyboard reference overlay."""
         box_w = min(74, w - 4)
         box_h = min(22, h - 4)
         top = (h - box_h) // 2
         left = (w - box_w) // 2
 
         for r in range(box_h):
-            self._safe_addstr(top + r, left, " " * box_w, curses.color_pair(5))
+            self._safe_addstr(top + r, left, " " * box_w, curses.color_pair(2))
 
         lines = [
-            "PULSE CLI: KEYBOARD CONTROLS REFERENCE",
+            "■ PULSE // KEYBOARD MATRIX",
             "─────────────────────────────────────────────────────────────",
             "PLAYBACK:",
-            "  Space          Toggle Play / Pause",
-            "  Left / Right   Seek backward / forward 5 seconds",
-            "  + / -          Increase / decrease volume by 5%",
-            "  m              Mute / unmute audio",
-            "  n / p          Next / Previous track in queue",
-            "  r              Cycle Repeat mode (Off -> Track -> Queue)",
-            "  s              Toggle Shuffle mode",
+            "  SPACE          TOGGLE PLAY / PAUSE",
+            "  LEFT / RIGHT   SEEK -5S / +5S",
+            "  + / -          VOLUME UP / DOWN (5%)",
+            "  M              MUTE / UNMUTE",
+            "  N / P          NEXT / PREV TRACK",
+            "  R              CYCLE REPEAT (OFF -> TRACK -> QUEUE)",
+            "  S              TOGGLE SHUFFLE",
             "",
             "NAVIGATION & LIBRARY:",
-            "  j / k (or Up/Down)  Move cursor selection",
-            "  Enter               Open directory or play file immediately",
-            "  Backspace / h       Go up to parent directory",
-            "  a                   Add file or entire folder to queue",
-            "  Tab                 Switch focus between Files and Queue",
-            "  /                   Activate search filter",
-            "  d / x               Remove track from queue",
-            "  c                   Clear entire queue",
-            "  q                   Quit Pulse CLI",
+            "  J / K (UP/DN)  MOVE SELECTION",
+            "  ENTER          OPEN DIR / PLAY FILE",
+            "  BACKSPACE / H  ASCEND (PARENT DIRECTORY)",
+            "  A              QUEUE FILE OR ENTIRE DIR",
+            "  TAB            SWITCH PANE (FILES <-> QUEUE)",
+            "  /              ACTIVATE SEARCH FILTER",
+            "  D / X          REMOVE TRACK FROM QUEUE",
+            "  C              CLEAR ALL QUEUE ITEMS",
+            "  Q              QUIT",
             "─────────────────────────────────────────────────────────────",
-            "Press any key to close this help screen...",
+            "PRESS ANY KEY TO CLOSE...",
         ]
 
         for idx, line in enumerate(lines[:box_h - 2]):
-            self._safe_addstr(top + 1 + idx, left + 2, line, curses.color_pair(5) | curses.A_BOLD)
+            self._safe_addstr(top + 1 + idx, left + 2, line, curses.color_pair(2) | curses.A_BOLD)
