@@ -1,9 +1,5 @@
 # Pulse CLI: Architecture Specification and User Manual
 
-**Technical Report:** TR-2026-PULSE  
-**System:** High-Performance Terminal Audio Reproduction and Spectral Analysis Engine  
-**Platform:** macOS (Darwin / CoreAudio)  
-
 ---
 
 ## Abstract
