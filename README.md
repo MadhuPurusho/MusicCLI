@@ -1,55 +1,87 @@
-# ⚡ Pulse CLI
+# Pulse CLI: Architecture Specification and User Manual
 
-> A sleek, keyboard-driven terminal MP3 player designed specifically for macOS, featuring real-time audio spectrum visualization and a modern Textual TUI.
-
-```
-┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
-│  ⚡ PULSE CLI  ::  Terminal MP3 Player             [~/Music]                    18:48  [?] Help  │
-├───────────────────────────────┬──────────────────────────────────────────────────────────────────┤
-│  📁 FILE EXPLORER             │  🎵 NOW PLAYING                                                  │
-│  [ Filter: synthwave_________ ]│  ┌────────────────────────────────────────────────────────────┐  │
-│                               │  │  COSMIC VOYAGE                                             │  │
-│  ▾ 📂 Music                   │  │  Artist: Stellaris   •   Album: Horizons (2026)             │  │
-│    ▾ 📂 Chillwave             │  │  Format: MP3 320 kbps (Joint Stereo, 44.1 kHz)             │  │
-│      ▸ Midnight_Drift.mp3     │  └────────────────────────────────────────────────────────────┘  │
-│      ▸ Cosmic_Voyage.mp3      │                                                                  │
-│      ▸ Solar_Echoes.mp3       │  LIVE AUDIO SPECTRUM                                             │
-│    ▸ 📂 Electronic            │   ▄█ █▄ █  ▄▆ █▅ █  ▄█ █▄ █  ▄▆ █▅ █  ▄█ █▄ █  ▄▆ █▅ █           │
-│    ▸ 📂 Lo-Fi                 │  █████████████████████████████████████████████████████████████   │
-│                               │                                                                  │
-│  [Enter] Play  [A] Add Queue  │  02:14 ━━━━━━━━━━━━━━━━━━━━━━●───────────────────── 04:55        │
-├───────────────────────────────┼──────────────────────────────────────────────────────────────────┤
-│  📑 QUEUE & PLAYLIST (3)      │  CONTROLS & STATUS                                               │
-│  1. Cosmic Voyage     [04:55] │  Status:  [ ▶ PLAYING ]       Volume: [ 🔊 85%  ████████░░ ]     │
-│  2. Midnight Drift    [03:40] │  Mode:    [ 🔁 Repeat: Track ] [ 🔀 Shuffle: Off ]               │
-│  3. Solar Echoes      [05:12] │  Shortcuts: [Space] Pause  [←/→] Seek  [↑/↓] Vol  [N] Next       │
-└───────────────────────────────┴──────────────────────────────────────────────────────────────────┘
-```
+**Technical Report:** TR-2026-PULSE  
+**System:** High-Performance Terminal Audio Reproduction and Spectral Analysis Engine  
+**Platform:** macOS (Darwin / CoreAudio)  
 
 ---
 
-## ✨ Features
+## Abstract
 
-- **Exclusive MP3 Focus**: Filters out all non-MP3 files, giving you a clutter-free music browsing experience.
-- **Mac-Native CoreAudio Engine**: Direct hardware integration via `miniaudio` with instant sub-millisecond seeking and zero audio stutter.
-- **Dynamic Spectrum Visualizer**: Animated multi-band audio equalizer rendered in neon gradients, synchronized directly with the output audio frames.
-- **ID3 Tag & Metadata Extraction**: Displays track title, artist, album, release year, bitrate (e.g. 320 kbps), sample rate, audio channels, and file size.
-- **Interactive File Explorer**: Navigate directories, jump to `~/Music` or `~/Downloads`, and use the live search filter (`/`) to find tracks instantly.
-- **Playlist & Queue System**: Enqueue single tracks or entire folders, reorder, delete, and enable loop (single/queue) or shuffle modes.
-- **Vim & Arrow Key Friendly**: Complete keyboard control with mouse click & drag support.
+Pulse CLI is a dedicated, keyboard-driven terminal audio player optimized for the macOS platform. The system couples an asynchronous Terminal User Interface (TUI) event loop with a direct hardware CoreAudio playback thread. Audio frames encoded in MPEG-1/2 Audio Layer III (MP3) are decoded to uncompressed 16-bit signed Linear Pulse Code Modulation (LPCM) in system memory, yielding sub-millisecond seek latency, exact frame accounting, and real-time spectral amplitude analysis. This document specifies the operational design, signal pipeline, operational controls, and contributor workflows.
 
 ---
 
-## 🚀 Installation
+## 1. System Architecture
 
-### Option 1: Quick Install Script (macOS)
+```
++-------------------------------------------------------------------------------+
+|                             Terminal User Interface                           |
+|                       (Textual Reactive Event Loop: 25 Hz)                    |
+|                                                                               |
+|  +-----------------------+  +----------------------------------------------+  |
+|  |   File Explorer       |  |  Player Card: ID3 Tags & Scrubber Engine     |  |
+|  |   - Inode Traversal   |  +----------------------------------------------+  |
+|  |   - MP3 Filter (.mp3) |  +----------------------------------------------+  |
+|  |   - Substring Query   |  |  Spectral Equalizer (Unicode Block Arrays)   |  |
+|  +-----------------------+  +----------------------------------------------+  |
+|  +-----------------------+  +----------------------------------------------+  |
+|  |   Queue Controller    |  |  Playback State & Volume Attenuation Deck    |  |
+|  +-----------------------+  +----------------------------------------------+  |
++-------------------------------------------------------------------------------+
+                                    |        ^
+                       State Events |        | Amplitude Metrics
+                                    v        |
++-------------------------------------------------------------------------------+
+|                             Core Audio Engine                                 |
+|                     (miniaudio / Darwin CoreAudio Host)                       |
+|                                                                               |
+|   +-------------------+    +--------------------+    +--------------------+   |
+|   | MP3 Bitstream     | -> | 44.1 kHz Stereo    | -> | CoreAudio Output   |   |
+|   | Decoder           |    | PCM Circular Ring  |    | Buffer (1024 smp)  |   |
+|   +-------------------+    +--------------------+    +--------------------+   |
+|                                      |                                        |
+|                                      v                                        |
+|                            Spectral Energy Engine                             |
+|                        (RMS / Peak Amplitude Extractor)                       |
++-------------------------------------------------------------------------------+
+```
+
+### 1.1 Audio Processing Pipeline
+1. **Decode Phase**: Incoming MP3 bitstreams are parsed and decoded into continuous arrays of signed 16-bit interleaved integers normalized to a constant sampling frequency of 44,100 Hz across two channels (Stereo).
+2. **Buffering & Delivery**: An audio generation coroutine supplies contiguous 1024-frame chunks to the native macOS CoreAudio output bus via `miniaudio`.
+3. **Seeking**: Temporal offsets are mapped directly to memory indices via the formula:
+   $$\text{Frame Offset} = \text{Target Time (seconds)} \times 44100$$
+   This eliminates decoder re-initialization and enables instantaneous repositioning.
+4. **Spectral Decomposition**: Prior to volume attenuation, each buffer chunk is partitioned into discrete bins. Peak and root-mean-square (RMS) energies are extracted and conditioned via non-linear perceptual scaling before transmission to the interface layer.
+
+---
+
+## 2. Installation and Deployment
+
+### 2.1 System Prerequisites
+- macOS 11.0 (Big Sur) or newer
+- Python 3.9 or higher
+- Homebrew package manager (recommended for dependency isolation)
+
+### 2.2 Automated Local Installation
+Execute the automated deployment script to generate an isolated execution environment and link the command directly to the user path:
+
 ```bash
+git clone https://github.com/pookie421/MusicCLI.git
+cd MusicCLI
 ./install.sh
 ```
-This sets up an isolated environment and installs the executable `pulse` to `~/.local/bin/pulse`.
 
-### Option 2: Using pip / virtualenv
+Ensure `~/.local/bin` is exported in your shell environment configuration (`~/.zshrc`):
 ```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+### 2.3 Manual Setup via Virtual Environment
+```bash
+git clone https://github.com/pookie421/MusicCLI.git
+cd MusicCLI
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
@@ -57,60 +89,143 @@ pip install -e .
 
 ---
 
-## 🎮 Usage
+## 3. Command-Line Interface and Execution
 
-Launch in your terminal:
+Pulse CLI accepts an optional file or directory path as an execution argument:
+
 ```bash
-# Launch player in ~/Music (or current folder)
+# Initialize player within current directory or default library path (~/Music)
 pulse
 
-# Open directly into a specific folder
-pulse ~/Music/Electronic
+# Initialize file explorer anchored to a specific directory path
+pulse /Volumes/Storage/Audio/Classics
 
-# Play an MP3 file immediately
-pulse /path/to/song.mp3
+# Initiate immediate playback of a specific audio file
+pulse /Volumes/Storage/Audio/track_01.mp3
 
-# Check version or help
-pulse --help
+# Display version specification
 pulse --version
+
+# Display argument parser help
+pulse --help
 ```
 
 ---
 
-## ⌨️ Keyboard Shortcuts
+## 4. Control Interface Matrix
 
-| Category | Shortcut | Description |
+The application operates entirely within the terminal viewport without external dependencies. Control mappings conform to standard POSIX terminal navigation patterns:
+
+| Subsystem | Input Key | Function |
 | :--- | :--- | :--- |
-| **Playback** | `Space` | Play / Pause |
-| | `←` / `→` | Seek Backward / Forward 5 seconds |
-| | `Shift + ←` / `Shift + →` | Seek Backward / Forward 15 seconds |
-| | `↑` / `↓` | Volume Up / Down 5% |
-| | `M` | Mute / Unmute audio |
-| | `N` | Skip to Next track in queue |
-| | `P` | Jump to Previous track |
-| | `R` | Cycle Repeat Mode (*Off* → *Track* → *Queue*) |
-| | `S` | Toggle Shuffle Mode (*On* / *Off*) |
-| **Library** | `Enter` | Play selected MP3 or open folder |
-| | `A` | Add selected MP3 or entire folder to queue |
-| | `/` | Focus search filter bar |
-| | `Esc` | Clear search / close modal |
-| | `Tab` | Switch focus between panels |
-| **Queue** | `Enter` | Jump directly to track in queue |
-| | `D` / `Delete` | Remove track from queue |
-| | `C` | Clear entire queue |
-| **General** | `?` | Toggle Help Overlay |
-| | `Q` | Quit Pulse CLI |
+| **Playback** | `Space` | Toggle Play / Pause state |
+| | `Left` / `Right` | Seek backward / forward 5 seconds |
+| | `Shift + Left` / `Shift + Right` | Seek backward / forward 15 seconds |
+| | `Up` / `Down` | Increment / decrement gain attenuation by 5% |
+| | `M` | Toggle audio mute |
+| | `N` | Advance to subsequent track in queue sequence |
+| | `P` | Revert to preceding track in queue sequence |
+| | `R` | Cycle repetition state (Disabled -> Single Track -> Full Queue) |
+| | `S` | Toggle randomized playback sequence |
+| **File Browser** | `Enter` | Trigger playback of highlighted file or expand directory |
+| | `A` | Enqueue selected file or recursively scan directory for MP3 files |
+| | `/` | Activate live substring search filter |
+| | `Esc` | Clear filter query or dismiss active overlays |
+| | `Tab` | Shift focus across active layout panes |
+| **Queue Matrix** | `Enter` | Force jump to selected row |
+| | `D` / `Delete` | Remove selected record from queue |
+| | `C` | Flush entire queue structure |
+| **Global** | `?` | Display internal operator reference manual |
+| | `Q` | Terminate application process cleanly |
 
 ---
 
-## 🛠️ Architecture
+## 5. Technical Specifications
 
-- **UI Framework**: [Textual](https://github.com/Textualize/textual) & [Rich](https://github.com/Textualize/rich)
-- **Audio Engine**: [Miniaudio](https://github.com/irmen/miniaudio) with native macOS CoreAudio backend
-- **Metadata Parser**: [Mutagen](https://github.com/quodlibet/mutagen) for ID3v1 and ID3v2 tags
+- **UI Framework**: `textual` (Reactive terminal application framework)
+- **Audio Output Driver**: Native CoreAudio via `miniaudio` (macOS Darwin API)
+- **Metadata Inspection**: `mutagen` (ID3v1.1, ID3v2.3, ID3v2.4 parser)
+- **Sampling Parameters**: 44,100 Hz, 16-bit Signed Integer, 2 Channels (Stereo)
+- **Spectral Update Frequency**: 25 Hz (40 ms discrete clock)
+- **Target Architecture**: Apple Silicon (arm64) and Intel (x86_64)
 
 ---
 
-## 📄 License
+## 6. Project Structure
 
-MIT License. See [LICENSE](LICENSE) for details.
+```
+MusicCLI/
+|-- pulse/
+|   |-- __init__.py           # Package version definition
+|   |-- __main__.py          # CLI entry point and argument parsing
+|   |-- app.py               # Main application orchestration loop
+|   |-- audio.py             # CoreAudio driver and PCM streaming
+|   |-- metadata.py          # ID3 extraction and duration calculation
+|   |-- queue_manager.py     # Deterministic and randomized queue models
+|   |-- styles.tcss          # Terminal CSS component definitions
+|   `-- widgets/
+|       |-- __init__.py
+|       |-- file_browser.py  # MP3-filtered directory tree widget
+|       |-- player_card.py   # Telemetry panel and progress display
+|       |-- queue_view.py    # Queue table viewer and manipulator
+|       `-- visualizer.py    # Discrete Unicode spectral visualizer
+|-- pyproject.toml           # PEP 621 package metadata
+|-- requirements.txt         # Pinned runtime dependencies
+|-- install.sh               # Local deployment script
+|-- LICENSE                  # MIT License
+`-- README.md                # System documentation
+```
+
+---
+
+## 7. Contributing and Development Guidelines
+
+Contributions that optimize performance, improve signal processing fidelity, or expand audio metadata support are welcomed.
+
+### 7.1 Development Setup
+1. Fork the upstream repository to your personal GitHub account.
+2. Clone your fork locally:
+   ```bash
+   git clone https://github.com/<your-username>/MusicCLI.git
+   cd MusicCLI
+   ```
+3. Establish a dedicated virtual environment:
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install --upgrade pip
+   pip install -e .
+   ```
+
+### 7.2 Verification Testing
+Pulse CLI includes headless integration tests using Textual's asynchronous pilot harness. Execute test verification prior to submitting code:
+
+```bash
+python3 -c "
+import asyncio
+from pulse.app import PulseApp
+
+async def verify():
+    app = PulseApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.query_one('#file-browser') is not None
+        assert app.query_one('#player-card') is not None
+        assert app.query_one('#visualizer') is not None
+        assert app.query_one('#queue-view') is not None
+        print('Integration test verified successfully.')
+
+asyncio.run(verify())
+"
+```
+
+### 7.3 Pull Request Protocol
+- Ensure adherence to PEP 8 style conventions and static type annotations.
+- Provide descriptive, imperative commit messages (`feat: ...`, `fix: ...`, `perf: ...`).
+- Verify that terminal cleanup hooks execute without leaving audio threads active upon program termination.
+
+---
+
+## 8. License
+
+This project is released under the terms of the MIT License. See [LICENSE](LICENSE) for the full text.
