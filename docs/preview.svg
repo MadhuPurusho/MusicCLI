@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 560" width="100%" height="100%">
+  <defs>
+    <style>
+      .bg { fill: #0d1117; }
+      .bar { fill: #161b22; }
+      .dot-red { fill: #ff5f56; }
+      .dot-yellow { fill: #ffbd2e; }
+      .dot-green { fill: #27c93f; }
+      .title { fill: #8b949e; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; text-anchor: middle; }
+      .t-norm { fill: #f0f6fc; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; }
+      .t-bold { fill: #ffffff; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; font-weight: bold; }
+      .t-dim  { fill: #8b949e; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; }
+      .inv-bg { fill: #f0f6fc; }
+      .inv-tx { fill: #0d1117; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; font-weight: bold; }
+    </style>
+  </defs>
+
+  <!-- Window Frame -->
+  <rect width="940" height="560" rx="10" ry="10" class="bg" />
+  <rect width="940" height="38" rx="10" ry="10" class="bar" />
+  <rect y="28" width="940" height="10" class="bar" />
+
+  <!-- Window Controls -->
+  <circle cx="20" cy="19" r="6" class="dot-red" />
+  <circle cx="40" cy="19" r="6" class="dot-yellow" />
+  <circle cx="60" cy="19" r="6" class="dot-green" />
+  <text x="470" y="24" class="title">sreegovindvarier — pulse — 100x26</text>
+
+  <!-- Terminal Content Area -->
+  <g transform="translate(18, 56)">
+    <!-- Header Row (Inverted) -->
+    <rect x="0" y="0" width="904" height="20" class="inv-bg" />
+    <text x="8" y="15" class="inv-tx">■ PULSE // AUDIO ENGINE 1.0   /Users/sreegovindvarier/Music</text>
+    <text x="735" y="15" class="inv-tx">[?] HELP  [Q] QUIT</text>
+
+    <!-- Header Divider -->
+    <text x="0" y="34" class="t-dim">──────────────────────────────────────────────────────────────────────────────────────────────────</text>
+
+    <!-- Split View (Files vs Queue) -->
+    <!-- Left: Files -->
+    <text x="0" y="52" class="t-bold">┌─[ 1: FILES ]──────────────────────────────┐</text>
+    <text x="0" y="70" class="t-dim">│  [DIR] ..                                 │</text>
+    <text x="0" y="88" class="t-norm">│  [DIR] Ambient/                           │</text>
+    <text x="0" y="106" class="t-norm">│  [DIR] Electronic/                        │</text>
+    <text x="0" y="124" class="t-norm">│  [DIR] Synthwave/                         │</text>
+
+    <!-- Highlighted Active Cursor -->
+    <rect x="18" y="129" width="372" height="18" class="inv-bg" />
+    <text x="0" y="142" class="t-bold">│</text>
+    <text x="22" y="142" class="inv-tx">▶ [MP3] 01. Solar Winds.mp3</text>
+    <text x="390" y="142" class="t-bold">│</text>
+
+    <text x="0" y="160" class="t-norm">│  [MP3] 02. Neon Horizon.mp3               │</text>
+    <text x="0" y="178" class="t-norm">│  [MP3] 03. Midnight Drift.mp3             │</text>
+    <text x="0" y="196" class="t-norm">│  [MP3] 04. Orbital Echoes.mp3             │</text>
+    <text x="0" y="214" class="t-bold">└───────────────────────────────────────────┘</text>
+
+    <!-- Right: Queue -->
+    <g transform="translate(460, 0)">
+      <text x="0" y="52" class="t-dim">┌─[ 2: QUEUE (4) ]──────────────────────────┐</text>
+      <text x="0" y="70" class="t-bold">│ ■ 01. Solar Winds - Stellaris       04:12 │</text>
+      <text x="0" y="88" class="t-norm">│   02. Neon Horizon - CyberPulse     03:50 │</text>
+      <text x="0" y="106" class="t-norm">│   03. Midnight Drift - SynthProject 04:45 │</text>
+      <text x="0" y="124" class="t-norm">│   04. Orbital Echoes - Solaris      05:12 │</text>
+      <text x="0" y="142" class="t-dim">│                                           │</text>
+      <text x="0" y="160" class="t-dim">│                                           │</text>
+      <text x="0" y="178" class="t-dim">│                                           │</text>
+      <text x="0" y="196" class="t-dim">│                                           │</text>
+      <text x="0" y="214" class="t-dim">└───────────────────────────────────────────┘</text>
+    </g>
+
+    <!-- Spectrum Analyzer Box -->
+    <g transform="translate(0, 222)">
+      <text x="0" y="12" class="t-bold">┌─[ SPECTRUM ANALYZER ]─────────────────────────────────────────────────────────────────────────┐</text>
+      <!-- Row 1: Upper peaks -->
+      <text x="0" y="32" class="t-bold">│         ▀▀    ██             ▀▀    ██       ▀▀             ██    ▀▀    ██             ██        │</text>
+      <!-- Row 2: Mid-high peaks -->
+      <text x="0" y="50" class="t-bold">│   ▀▀    ██ ▀▀ ██ ▀▀    ██    ██    ██ ▀▀    ██ ▀▀    ██    ██    ██    ██ ▀▀    ██    ██ ▀▀     │</text>
+      <!-- Row 3: Body & Lows -->
+      <text x="0" y="68" class="t-bold">│   ██ ▀▀ ██ ██ ██ ██ ▀▀ ██ ▀▀ ██ ▀▀ ██ ██ ▀▀ ██ ██ ▀▀ ██ ▀▀ ██ ▀▀ ██ ▀▀ ██ ██ ▀▀ ██ ▀▀ ██ ██ ▀▀  │</text>
+      <!-- Row 4: Base -->
+      <text x="0" y="86" class="t-bold">│   ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██ ██   │</text>
+      <text x="0" y="102" class="t-bold">└───────────────────────────────────────────────────────────────────────────────────────────────┘</text>
+    </g>
+
+    <!-- Telemetry & Scrubber Box -->
+    <g transform="translate(0, 332)">
+      <text x="0" y="12" class="t-norm">┌─[ TELEMETRY ]─────────────────────────────────────────────────────────────────────────────────┐</text>
+      <text x="0" y="30" class="t-bold">│ [PLAY] Stellaris - Solar Winds                                         [320k / STEREO]        │</text>
+      <text x="0" y="48" class="t-norm">│ 01:45 [████████████████████████▓▓▒▒░░░░░░░░░░░░░░░░░░░░░░░░] 04:12 (-02:27)  42.3%            │</text>
+      <text x="0" y="66" class="t-bold">└─[ VOL:[████████░░]  │  LOOP:OFF  │  SHUF:OFF  │  TRK:01/04 ]──────────────────────────────────┘</text>
+    </g>
+
+    <!-- Command Strip (Inverted) -->
+    <g transform="translate(0, 420)">
+      <rect x="0" y="0" width="904" height="20" class="inv-bg" />
+      <text x="14" y="15" class="inv-tx">[SPACE] PLAY/PAUSE   [ENTER] OPEN/PLAY   [A] ADD   [TAB] PANE   [←/→] SEEK   [+/-] VOL   [Q] QUIT</text>
+    </g>
+  </g>
+</svg>

@@ -1,14 +1,95 @@
-# Pulse CLI: Architecture Specification and User Manual
+# Pulse CLI
+
+<p align="center">
+  <a href="https://github.com/pookie421/MusicCLI"><img src="https://img.shields.io/badge/checks-passing-brightgreen?style=flat-square&logo=github" alt="Checks Passing"></a>
+  <a href="https://github.com/pookie421/MusicCLI"><img src="https://img.shields.io/badge/platform-macOS-black?style=flat-square&logo=apple&logoColor=white" alt="Platform: macOS"></a>
+  <a href="https://www.python.org"><img src="https://img.shields.io/badge/python-3.9+-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.9+"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/code-MIT-4183c4?style=flat-square" alt="License: MIT"></a>
+  <a href="https://github.com/pookie421/MusicCLI"><img src="https://img.shields.io/badge/audio-CoreAudio-gray?style=flat-square" alt="Audio: CoreAudio"></a>
+  <a href="https://github.com/pookie421/MusicCLI"><img src="https://img.shields.io/badge/ui-1--bit%20curses-black?style=flat-square" alt="UI: 1-Bit Curses"></a>
+</p>
+
+<p align="center">
+  A high-performance, 1-bit monochrome terminal MP3 player for macOS with real-time discrete hardware spectrum analysis and zero pseudo-GUI bloat.
+</p>
+
+<p align="center">
+  <img src="docs/preview.png" alt="Pulse CLI Interface" width="100%" />
+</p>
 
 ---
 
-## Abstract
+## Quickstart
 
-Pulse CLI is a pure Unix terminal audio player optimized for the macOS platform. Operating in the tradition of classic console utilities such as `cmus` and `ncmpcpp`, the system utilizes a high-performance `curses` double-buffered cell grid with zero graphical toolkit or web styling overhead. Playback is driven directly via a native Darwin CoreAudio thread. Audio frames encoded in MPEG-1/2 Audio Layer III (MP3) are decoded to uncompressed 16-bit signed Linear Pulse Code Modulation (LPCM) in memory, yielding instantaneous seeking, exact frame accounting, and real-time discrete spectral analysis.
+### Automated Install (Recommended)
+
+Run the one-line deployment script to set up an isolated environment and link `pulse` to your path:
+
+```bash
+git clone https://github.com/pookie421/MusicCLI.git
+cd MusicCLI
+./install.sh
+```
+
+Ensure `~/.local/bin` is in your shell path (add to `~/.zshrc` if not present):
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Then launch the player from any directory:
+```bash
+pulse
+```
 
 ---
 
-## 1. System Architecture
+## Usage
+
+Pulse CLI accepts an optional file or directory path as an argument:
+
+```bash
+# Launch player in ~/Music (or current working directory)
+pulse
+
+# Open directly into a specific folder
+pulse ~/Music/Electronic
+
+# Play an MP3 file immediately
+pulse /path/to/song.mp3
+
+# Display argument options
+pulse --help
+```
+
+---
+
+## Keyboard Controls Reference
+
+The application operates entirely within the terminal using standard POSIX and Vim-style keybindings:
+
+| Action | Keybinding |
+| :--- | :--- |
+| **Play / Pause** | `Space` |
+| **Seek Backward / Forward** | `Left` / `Right` (or `,` / `.`) `±5s` |
+| **Volume Up / Down** | `+` / `-` (or `]` / `[`) `±5%` |
+| **Mute / Unmute** | `M` |
+| **Next / Previous Track** | `N` / `P` |
+| **Cycle Repeat Mode** | `R` *(Off → Track → Queue)* |
+| **Toggle Shuffle Mode** | `S` *(On / Off)* |
+| **Navigate Selection** | `j` / `k` (or `Up` / `Down`) |
+| **Open Folder / Play File** | `Enter` (or `l`) |
+| **Ascend to Parent Folder** | `Backspace` (or `h`) |
+| **Add to Playlist Queue** | `A` *(Enqueues file or entire directory)* |
+| **Switch Focus Panes** | `Tab` *(Files `[1]` ↔ Queue `[2]`)* |
+| **Search Filter** | `/` *(Type to filter, `Enter` to confirm, `Esc` to clear)* |
+| **Remove from Queue** | `D` / `X` |
+| **Clear Queue** | `C` |
+| **Internal Help Screen** | `?` |
+| **Quit** | `Q` |
+
+---
+
+## System Architecture
 
 ```
 +-------------------------------------------------------------------------------+
@@ -41,34 +122,17 @@ Pulse CLI is a pure Unix terminal audio player optimized for the macOS platform.
 +-------------------------------------------------------------------------------+
 ```
 
-### 1.1 Audio Processing Pipeline
-1. **Decode Phase**: Incoming MP3 bitstreams are parsed and decoded into continuous arrays of signed 16-bit interleaved integers normalized to a constant sampling frequency of 44,100 Hz across two channels (Stereo).
-2. **Buffering & Delivery**: An audio generation coroutine supplies contiguous 1024-frame chunks to the native macOS CoreAudio output bus via `miniaudio`.
-3. **Seeking**: Temporal offsets are mapped directly to memory indices via:
+### Signal Processing Pipeline
+1. **Decode Phase**: Incoming MP3 bitstreams are decoded into contiguous signed 16-bit interleaved PCM normalized to a constant sampling frequency of 44,100 Hz (Stereo).
+2. **Buffering & Delivery**: An audio generator supplies 1024-frame chunks to the native macOS CoreAudio bus via `miniaudio`.
+3. **Sub-Millisecond Seeking**: Temporal seek offsets map directly to memory indices via:
    $$\text{Frame Offset} = \text{Target Time (seconds)} \times 44100$$
-4. **Spectral Decomposition**: Prior to volume attenuation, each buffer chunk is partitioned into discrete bins. Peak and root-mean-square (RMS) energies are extracted and conditioned via non-linear perceptual scaling before transmission to the interface layer.
+4. **Spectral Analysis**: Real-time amplitude metrics are processed at 25 Hz and rendered as high-contrast discrete pixel blocks with peak-hold indicators.
 
 ---
 
-## 2. Installation and Deployment
+## Manual Setup & Development
 
-### 2.1 System Prerequisites
-- macOS 11.0 (Big Sur) or newer
-- Python 3.9 or higher
-
-### 2.2 Automated Local Installation
-```bash
-git clone https://github.com/pookie421/MusicCLI.git
-cd MusicCLI
-./install.sh
-```
-
-Ensure `~/.local/bin` is exported in your shell environment configuration (`~/.zshrc`):
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-### 2.3 Manual Setup via Virtual Environment
 ```bash
 git clone https://github.com/pookie421/MusicCLI.git
 cd MusicCLI
@@ -77,79 +141,19 @@ source .venv/bin/activate
 pip install -e .
 ```
 
----
-
-## 3. Command-Line Interface and Execution
-
-```bash
-# Initialize player within default directory (~/Music or current path)
-pulse
-
-# Initialize file explorer anchored to a specific directory path
-pulse /Volumes/Storage/Audio/Classics
-
-# Initiate immediate playback of a specific audio file
-pulse /Volumes/Storage/Audio/track_01.mp3
-
-# Display version specification
-pulse --version
-
-# Display argument parser help
-pulse --help
-```
-
----
-
-## 4. Control Interface Matrix
-
-The application operates entirely within the terminal viewport without external dependencies or pseudo-GUI widgets. Navigation conforms to standard UNIX / Vim patterns:
-
-| Subsystem | Input Key | Function |
-| :--- | :--- | :--- |
-| **Playback** | `Space` | Toggle Play / Pause state |
-| | `Left` / `Right` (or `,` / `.`) | Seek backward / forward 5 seconds |
-| | `+` / `-` (or `]` / `[`) | Increment / decrement gain attenuation by 5% |
-| | `m` | Toggle audio mute |
-| | `n` / `p` | Advance / revert track in queue sequence |
-| | `r` | Cycle repetition state (Off -> Track -> Queue) |
-| | `s` | Toggle randomized playback sequence (Shuffle) |
-| **Browser** | `j` / `k` (or `Up` / `Down`) | Move cursor selection |
-| | `Enter` (or `l`) | Open directory or trigger playback of selected file |
-| | `Backspace` (or `h`) | Ascend to parent directory (`../`) |
-| | `a` | Enqueue selected file or recursively scan directory for MP3 files |
-| | `/` | Activate live substring search filter |
-| | `Esc` | Clear search filter |
-| **Panes & Queue**| `Tab` | Switch active focus between Files (1) and Queue (2) |
-| | `Enter` *(in Queue)* | Force jump to selected record |
-| | `d` / `x` | Remove selected record from queue |
-| | `c` | Clear entire queue |
-| **Global** | `?` | Display internal operator reference manual |
-| | `q` | Terminate application process cleanly |
-
----
-
-## 5. Technical Specifications
-
-- **Terminal Driver**: Native POSIX `curses` standard library
-- **Audio Output Driver**: Native CoreAudio via `miniaudio` (macOS Darwin API)
-- **Metadata Engine**: `mutagen` (ID3v1.1, ID3v2.3, ID3v2.4 parser)
-- **Sampling Parameters**: 44,100 Hz, 16-bit Signed Integer, 2 Channels (Stereo)
-- **Refresh Frequency**: 25 Hz (40 ms non-blocking event loop)
-- **Memory Footprint**: < 20 MB resident memory
-
----
-
-## 6. Project Structure
-
+### Project Structure
 ```
 MusicCLI/
 |-- pulse/
 |   |-- __init__.py           # Package version definition
 |   |-- __main__.py          # CLI entry point and argument parsing
-|   |-- app.py               # Pure curses interface loop and rendering
+|   |-- app.py               # 1-bit monochrome curses interface loop
 |   |-- audio.py             # CoreAudio driver and PCM streaming
 |   |-- metadata.py          # ID3 extraction and duration calculation
 |   `-- queue_manager.py     # Deterministic and randomized queue models
+|-- docs/
+|   |-- preview.png          # High-resolution UI preview
+|   `-- preview.svg          # Vector terminal graphic
 |-- pyproject.toml           # PEP 621 package metadata
 |-- requirements.txt         # Minimal runtime dependencies (miniaudio, mutagen)
 |-- install.sh               # Local deployment script
@@ -159,24 +163,17 @@ MusicCLI/
 
 ---
 
-## 7. Contributing and Development Guidelines
+## Contributing
 
-### 7.1 Development Setup
-```bash
-git clone https://github.com/<your-username>/MusicCLI.git
-cd MusicCLI
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
-
-### 7.2 Pull Request Protocol
-- Maintain pure curses architecture; do not introduce web/CSS/widget framework dependencies.
-- Ensure strict type annotations and PEP 8 formatting.
-- Confirm terminal state restoration upon process exit.
+Contributions that optimize performance or enhance audio metadata parsing are welcomed:
+1. Fork the repository.
+2. Create your feature branch (`git checkout -b feature/enhancement`).
+3. Commit your changes (`git commit -m 'feat: add feature'`).
+4. Push to the branch (`git push origin feature/enhancement`).
+5. Open a Pull Request.
 
 ---
 
-## 8. License
+## License
 
-This project is released under the terms of the MIT License. See [LICENSE](LICENSE) for the full text.
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
