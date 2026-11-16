@@ -1,20 +1,29 @@
-"""Audio metadata and embedded cover art extraction for MP3 and FLAC files."""
+"""Audio metadata and album cover art extraction for MP3 and FLAC files."""
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
+import json
 import os
+import re
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
 try:
+    from mutagen import File as MutagenFile
+    from mutagen.flac import FLAC, Picture
     from mutagen.mp3 import MP3
-    from mutagen.flac import FLAC
     from mutagen.id3 import ID3NoHeaderError
 except ImportError:
+    MutagenFile = None
     MP3 = None
     FLAC = None
+    Picture = None
     ID3NoHeaderError = Exception
 
 
@@ -63,6 +72,7 @@ class TrackMetadata:
     file_format: str = "MP3"
     cover_data: Optional[bytes] = None
     cover_mime: Optional[str] = None
+    cover_source: str = ""  # "embedded", "folder", "online", or ""
 
     @property
     def formatted_duration(self) -> str:
@@ -84,24 +94,27 @@ class TrackMetadata:
 
     @staticmethod
     def empty_pixel_art(width: int = 14, height: int = 5) -> List[str]:
-        """Default retro 1-bit vinyl disc placeholder."""
-        cassette = [
-            "┌──────────────┐",
-            "│  ▄████████▄  │",
-            "│ ███▀██▀▀███  │",
-            "│ ███▄██▄▄███  │",
-            "│  ▀████████▀  │",
-            "└──────────────┘",
-        ]
-        res = []
-        for l in cassette[:height]:
-            res.append(l.center(width))
-        while len(res) < height:
-            res.append(" " * width)
-        return res
+        """Clean 1-bit monochrome frame when track has no cover."""
+        if height <= 2:
+            return [" " * width] * height
+        top = "┌" + ("─" * max(0, width - 2)) + "┐"
+        bot = "└" + ("─" * max(0, width - 2)) + "┘"
+        inner_h = max(0, height - 2)
+        lines = [top]
+        mid = inner_h // 2
+        for r in range(inner_h):
+            if r == mid and inner_h >= 2:
+                txt = "NO COVER".center(width - 2)
+            elif r == mid + 1 and inner_h >= 3:
+                txt = "ART".center(width - 2)
+            else:
+                txt = " " * (width - 2)
+            lines.append("│" + txt + "│")
+        lines.append(bot)
+        return lines[:height]
 
     def get_pixel_art(self, width: int = 14, height: int = 5) -> List[str]:
-        """Generate a 1-bit monochrome pixel-art rendition of embedded album cover."""
+        """Generate a 1-bit monochrome pixel-art rendition of the actual album cover."""
         if not self.has_cover:
             return TrackMetadata.empty_pixel_art(width, height)
 
@@ -129,7 +142,7 @@ class TrackMetadata:
                 lines.append("".join(row))
             return lines
         except Exception:
-            return ["  [NO ART]  ".center(width)] * height
+            return TrackMetadata.empty_pixel_art(width, height)
 
     def save_cover_temp(self) -> Optional[Path]:
         """Save cover art to a temporary file for viewing in macOS Preview."""
@@ -149,7 +162,7 @@ class TrackMetadata:
 
     @classmethod
     def from_path(cls, path: Path | str) -> TrackMetadata:
-        """Parse metadata and cover art from an MP3 or FLAC file."""
+        """Parse metadata and genuine cover art from an audio file."""
         path = Path(path).resolve()
         file_size = 0
         try:
@@ -168,9 +181,13 @@ class TrackMetadata:
         bitrate = 0
         sample_rate = 44100
         channels = "Stereo"
-        cover_data = None
-        cover_mime = None
+        cover_data: Optional[bytes] = None
+        cover_mime: Optional[str] = None
+        cover_source: str = ""
 
+        # -------------------------------------------------------------
+        # 1. Parse Metadata & Embedded Artwork
+        # -------------------------------------------------------------
         # Parse FLAC files
         if ext == ".flac" and FLAC is not None and path.exists():
             try:
@@ -196,11 +213,49 @@ class TrackMetadata:
                     elif kl == "genre" and v:
                         genre = str(v[0]).strip()
 
-                if audio.pictures:
+                # Extract embedded pictures from FLAC blocks
+                if getattr(audio, "pictures", None):
                     # Prefer front cover (type 3)
-                    front = next((p for p in audio.pictures if p.type == 3), audio.pictures[0])
-                    cover_data = front.data
-                    cover_mime = getattr(front, "mime", "image/jpeg")
+                    front = next((p for p in audio.pictures if getattr(p, "type", 0) == 3), audio.pictures[0])
+                    if getattr(front, "data", None):
+                        cover_data = front.data
+                        cover_mime = getattr(front, "mime", "image/jpeg")
+                        cover_source = "embedded"
+
+                # Extract pictures from Vorbis comments (METADATA_BLOCK_PICTURE)
+                if not cover_data and hasattr(audio, "tags") and audio.tags and Picture is not None:
+                    for key in ("metadata_block_picture", "METADATA_BLOCK_PICTURE"):
+                        if key in audio.tags:
+                            for b64_str in audio.tags[key]:
+                                try:
+                                    raw = base64.b64decode(b64_str)
+                                    pic = Picture(raw)
+                                    if getattr(pic, "data", None):
+                                        cover_data = pic.data
+                                        cover_mime = getattr(pic, "mime", "image/jpeg")
+                                        cover_source = "embedded"
+                                        break
+                                except Exception:
+                                    pass
+                            if cover_data:
+                                break
+
+                # Extract pictures from Vorbis comments (COVERART)
+                if not cover_data and hasattr(audio, "tags") and audio.tags:
+                    for key in ("coverart", "COVERART"):
+                        if key in audio.tags:
+                            for b64_str in audio.tags[key]:
+                                try:
+                                    raw = base64.b64decode(b64_str)
+                                    if len(raw) > 64:
+                                        cover_data = raw
+                                        cover_mime = "image/jpeg"
+                                        cover_source = "embedded"
+                                        break
+                                except Exception:
+                                    pass
+                            if cover_data:
+                                break
             except Exception:
                 pass
 
@@ -248,14 +303,127 @@ class TrackMetadata:
                             genre = str(val[0]).strip()
                             break
 
-                    # Extract APIC cover art
-                    for tag in tags.values():
-                        if getattr(tag, "FrameID", None) == "APIC":
-                            cover_data = getattr(tag, "data", None)
-                            cover_mime = getattr(tag, "mime", "image/jpeg")
-                            break
+                    # Extract APIC / PIC cover art from ID3 tags
+                    apic_frames = []
+                    try:
+                        apic_frames = tags.getall("APIC")
+                    except Exception:
+                        pass
+                    if not apic_frames:
+                        try:
+                            apic_frames = tags.getall("PIC")
+                        except Exception:
+                            pass
+                    if not apic_frames:
+                        for tag in tags.values():
+                            frame_id = getattr(tag, "FrameID", "")
+                            if frame_id in ("APIC", "PIC"):
+                                apic_frames.append(tag)
+
+                    if apic_frames:
+                        # Prefer type 3 (Front Cover)
+                        front = next((p for p in apic_frames if getattr(p, "type", 0) == 3), apic_frames[0])
+                        if getattr(front, "data", None):
+                            cover_data = front.data
+                            cover_mime = getattr(front, "mime", "image/jpeg")
+                            cover_source = "embedded"
             except Exception:
                 pass
+
+        # Generic Mutagen container fallback (e.g. M4A/AAC 'covr')
+        if not cover_data and MutagenFile is not None and path.exists():
+            try:
+                mf = MutagenFile(path)
+                if mf and getattr(mf, "tags", None):
+                    covr = mf.tags.get("covr")
+                    if covr and len(covr) > 0:
+                        raw_covr = covr[0]
+                        cover_data = bytes(raw_covr)
+                        cover_mime = "image/jpeg" if getattr(raw_covr, "imageformat", None) == 13 else "image/png"
+                        cover_source = "embedded"
+            except Exception:
+                pass
+
+        # -------------------------------------------------------------
+        # 2. Local Folder Artwork (Album Directory)
+        # -------------------------------------------------------------
+        if not cover_data and path.parent.exists():
+            candidate_names = (
+                "cover.jpg", "cover.jpeg", "cover.png",
+                "folder.jpg", "folder.jpeg", "folder.png",
+                "front.jpg", "front.jpeg", "front.png",
+                "album.jpg", "album.jpeg", "album.png",
+                "artwork.jpg", "artwork.jpeg", "artwork.png",
+                f"{path.stem}.jpg", f"{path.stem}.jpeg", f"{path.stem}.png",
+            )
+            for name in candidate_names:
+                cand = path.parent / name
+                if cand.is_file():
+                    try:
+                        raw = cand.read_bytes()
+                        if len(raw) > 64:
+                            cover_data = raw
+                            cover_mime = "image/png" if cand.suffix.lower() == ".png" else "image/jpeg"
+                            cover_source = "folder"
+                            break
+                    except Exception:
+                        pass
+
+        # -------------------------------------------------------------
+        # 3. Track Cover Matcher (Online Fallback for Known Songs)
+        # -------------------------------------------------------------
+        if not cover_data:
+            query = ""
+            if artist and artist != "Unknown Artist" and title:
+                query = f"{artist} {title}"
+            elif title and title != path.stem:
+                query = title
+            else:
+                clean_name = re.sub(r"\(\d+\)|\.mp3|\.flac", "", path.stem, flags=re.I)
+                clean_name = clean_name.replace("_", " ").replace("-", " ").strip()
+                if len(clean_name) >= 3 and not clean_name.isdigit():
+                    query = clean_name
+
+            if query:
+                cache_dir = Path.home() / ".pulse-cli" / "cover_cache"
+                try:
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    q_hash = hashlib.md5(query.lower().encode("utf-8")).hexdigest()
+                    cached_img = cache_dir / f"{q_hash}.jpg"
+
+                    if cached_img.is_file():
+                        try:
+                            raw = cached_img.read_bytes()
+                            if len(raw) > 64:
+                                cover_data = raw
+                                cover_mime = "image/jpeg"
+                                cover_source = "online"
+                        except Exception:
+                            pass
+                    else:
+                        # Quick lookup from official music database
+                        encoded_q = urllib.parse.quote(query)
+                        url = f"https://itunes.apple.com/search?term={encoded_q}&media=music&entity=song&limit=1"
+                        req = urllib.request.Request(url, headers={"User-Agent": "PulseCLI/1.0"})
+                        with urllib.request.urlopen(req, timeout=1.5) as resp:
+                            payload = json.loads(resp.read().decode("utf-8"))
+                            if payload.get("results"):
+                                item = payload["results"][0]
+                                art_url = item.get("artworkUrl100", "")
+                                if art_url:
+                                    hi_res_url = art_url.replace("100x100bb", "600x600bb")
+                                    with urllib.request.urlopen(hi_res_url, timeout=2.0) as img_resp:
+                                        img_bytes = img_resp.read()
+                                        if len(img_bytes) > 256:
+                                            cover_data = img_bytes
+                                            cover_mime = "image/jpeg"
+                                            cover_source = "online"
+                                            try:
+                                                cached_img.write_bytes(img_bytes)
+                                            except Exception:
+                                                pass
+                except Exception:
+                    pass
 
         return cls(
             path=path,
@@ -272,4 +440,5 @@ class TrackMetadata:
             file_format=file_format,
             cover_data=cover_data,
             cover_mime=cover_mime,
+            cover_source=cover_source,
         )

@@ -40,27 +40,27 @@
     <!-- Left: Files -->
     <text x="0" y="52" class="t-bold">┌─[ 1: FILES ]──────────────────────────────┐</text>
     <text x="0" y="70" class="t-dim">│  [DIR] ..                                 │</text>
-    <text x="0" y="88" class="t-norm">│  [DIR] Electronic/                        │</text>
+    <text x="0" y="88" class="t-norm">│  [DIR] Phonk/                             │</text>
     <text x="0" y="106" class="t-norm">│  [DIR] Synthwave/                         │</text>
 
     <!-- Highlighted Active Cursor -->
     <rect x="18" y="111" width="372" height="18" class="inv-bg" />
     <text x="0" y="124" class="t-bold">│</text>
-    <text x="22" y="124" class="inv-tx">▶ [FLAC] 01. Terminal Odyssey.flac</text>
+    <text x="22" y="124" class="inv-tx">▶ [FLAC] phonky-business.flac</text>
     <text x="390" y="124" class="t-bold">│</text>
 
-    <text x="0" y="142" class="t-norm">│  [FLAC] 02. Neon Grid.flac                │</text>
-    <text x="0" y="160" class="t-norm">│  [MP3]  03. Midnight Drift.mp3            │</text>
-    <text x="0" y="178" class="t-norm">│  [MP3]  04. Orbital Echoes.mp3            │</text>
+    <text x="0" y="142" class="t-norm">│  [MP3]  phonky-business.mp3               │</text>
+    <text x="0" y="160" class="t-norm">│  [MP3]  0405 (2).MP3.mp3                  │</text>
+    <text x="0" y="178" class="t-norm">│  [DIR]  Downloads/                        │</text>
     <text x="0" y="196" class="t-bold">└───────────────────────────────────────────┘</text>
 
     <!-- Right: Queue -->
     <g transform="translate(460, 0)">
-      <text x="0" y="52" class="t-dim">┌─[ 2: QUEUE (4) ]──────────────────────────┐</text>
-      <text x="0" y="70" class="t-bold">│ ■ 01. Terminal Odyssey - Retro Synth01:19 │</text>
-      <text x="0" y="88" class="t-norm">│   02. Neon Grid - CyberPulse        03:50 │</text>
-      <text x="0" y="106" class="t-norm">│   03. Midnight Drift - SynthWave    04:45 │</text>
-      <text x="0" y="124" class="t-norm">│   04. Orbital Echoes - Solaris      05:12 │</text>
+      <text x="0" y="52" class="t-dim">┌─[ 2: QUEUE (2) ]──────────────────────────┐</text>
+      <text x="0" y="70" class="t-bold">│ ■ 01. Phonky Business - Phrozen     02:08 │</text>
+      <text x="0" y="88" class="t-norm">│   02. 0405 (2)                      01:19 │</text>
+      <text x="0" y="106" class="t-dim">│                                           │</text>
+      <text x="0" y="124" class="t-dim">│                                           │</text>
       <text x="0" y="142" class="t-dim">│                                           │</text>
       <text x="0" y="160" class="t-dim">│                                           │</text>
       <text x="0" y="178" class="t-dim">│                                           │</text>
@@ -80,10 +80,10 @@
     <!-- Now Playing & Album Cover Box -->
     <g transform="translate(0, 314)">
       <text x="0" y="12" class="t-norm">┌─[ NOW PLAYING &amp; COVER ]────────────────────────────────────────────────────────────────────────┐</text>
-      <text x="0" y="30" class="t-norm">│ <tspan class="t-bold"> ▄  ▄███▄▄   </tspan> │ <tspan class="t-bold">[PLAY] Retro Synth - Terminal Odyssey</tspan>                 <tspan class="t-bold">[FLAC 588k / STEREO]</tspan> │</text>
-      <text x="0" y="48" class="t-norm">│ <tspan class="t-bold">▄  ██▀  ███  </tspan> │ ALBUM: Neon Grid 1984 (1984)  GENRE: Synthwave                                  │</text>
-      <text x="0" y="66" class="t-norm">│ <tspan class="t-bold"> ▀  ▀▀█▀▀▀   </tspan> │ 00:15 [████████████████▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 01:19 (-01:04) 18.9% │</text>
-      <text x="0" y="84" class="t-norm">│ <tspan class="t-bold"> ▀ ▄ ▄  ▄  ▄ </tspan> │ VOL:[███████░░░] 70%  │  LOOP:OFF  │  SHUF:OFF  │  TRK:01/04  │  <tspan class="t-bold">[V] COVER</tspan>       │</text>
+      <text x="0" y="30" class="t-norm">│ <tspan class="t-bold">     ▄        </tspan> │ <tspan class="t-bold">[PLAY] Phrozen - Phonky Business</tspan>                     <tspan class="t-bold">[FLAC 588k / STEREO]</tspan> │</text>
+      <text x="0" y="48" class="t-norm">│ <tspan class="t-bold">   ▀▄▀█ █ ▀ ▀ </tspan> │ ALBUM: Phonky Business - Single (2023)  GENRE: Phonk                            │</text>
+      <text x="0" y="66" class="t-norm">│ <tspan class="t-bold">  ▀ ▄▀ ▀ ▀▄▀ ▀</tspan> │ 00:24 [████████████████▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 02:08 (-01:44) 18.7% │</text>
+      <text x="0" y="84" class="t-norm">│ <tspan class="t-bold">  ▄     ▀   ▀ </tspan> │ VOL:[███████░░░] 70%  │  LOOP:OFF  │  SHUF:OFF  │  TRK:01/02  │  <tspan class="t-bold">[V] COVER</tspan>       │</text>
       <text x="0" y="100" class="t-bold">└───────────────────────────────────────────────────────────────────────────────────────────────┘</text>
     </g>
 

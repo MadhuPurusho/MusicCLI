@@ -178,6 +178,8 @@ class PulseApp:
                 target_track = self.queue.current_track
 
             if target_track:
+                self.cover_modal_track = target_track
+                self.show_cover_modal = True
                 if target_track.has_cover:
                     temp_cover = target_track.save_cover_temp()
                     if temp_cover:
@@ -186,11 +188,10 @@ class PulseApp:
                             subprocess.Popen(["open", str(temp_cover)])
                         except Exception:
                             pass
-                    self.cover_modal_track = target_track
-                    self.show_cover_modal = True
-                    self.set_status(f"COVER ART: {target_track.title}")
+                    src_tag = f" ({target_track.cover_source.upper()})" if target_track.cover_source else ""
+                    self.set_status(f"COVER{src_tag}: OPENED IN PREVIEW")
                 else:
-                    self.set_status(f"NO EMBEDDED COVER ART: {target_track.title}")
+                    self.set_status(f"NO COVER ART: {target_track.title}")
             else:
                 self.set_status("NO TRACK SELECTED")
 
@@ -790,6 +791,10 @@ class PulseApp:
         art_w = min(22, max(12, box_w // 3))
         lines = track.get_pixel_art(art_w, inner_h)
 
+        preview_notice = "• OPENED IN MACOS PREVIEW" if track.has_cover else "• NO COVER ATTACHED"
+        src_map = {"embedded": "SOURCE: EMBEDDED IN AUDIO", "folder": "SOURCE: ALBUM FOLDER ART", "online": "SOURCE: MATCHED ALBUM ART"}
+        source_notice = src_map.get(track.cover_source, "")
+
         details = [
             f"TRACK:  {track.title}",
             f"ARTIST: {track.artist}",
@@ -798,8 +803,8 @@ class PulseApp:
             f"FORMAT: {track.file_format} Lossless" if track.file_format == "FLAC" else f"FORMAT: {track.file_format}",
             f"SPECS:  {track.sample_rate} Hz / {track.channels}",
             f"RATE:   {track.bitrate} kbps",
-            "",
-            "• OPENED IN MACOS PREVIEW",
+            source_notice,
+            preview_notice,
             "[ PRESS ANY KEY TO DISMISS ]",
         ]
         active_details = [d for d in details if d != ""]
