@@ -25,7 +25,7 @@ class AudioEngine:
 
     SAMPLE_RATE = 44100
     CHANNELS = 2
-    NUM_VISUALIZER_BARS = 24
+    NUM_VISUALIZER_BARS = 64
 
     def __init__(self):
         self._lock = threading.Lock()
@@ -119,14 +119,14 @@ class AudioEngine:
 
             # Compute peak amplitude normalized to [0, 1]
             peak = max(abs(s) for s in sub) / 32768.0
-            # Non-linear perceptual scaling
-            target = min(1.0, math.pow(peak, 0.6) * 1.35)
+            # Non-linear perceptual scaling for punchy, pronounced visualizer bars
+            target = min(1.0, math.pow(peak, 0.38) * 1.65)
 
             # Attack / decay smoothing
             if target > self.levels[b]:
-                self.levels[b] = self.levels[b] * 0.2 + target * 0.8
+                self.levels[b] = self.levels[b] * 0.15 + target * 0.85
             else:
-                self.levels[b] = self.levels[b] * 0.75 + target * 0.25
+                self.levels[b] = self.levels[b] * 0.70 + target * 0.30
 
     def _decay_levels(self) -> None:
         """Decay spectrum bars toward zero when audio is silent/idle."""

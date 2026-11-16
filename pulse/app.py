@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import curses
+import math
 import os
 import sys
 import time
@@ -54,8 +55,9 @@ class PulseApp:
         self.status_time: float = 0.0
 
         # Spectrum peak-hold state for retro 1-bit hardware meters
-        self.peak_levels: List[float] = [0.0] * 64
-        self.peak_hold_frames: List[int] = [0] * 64
+        self.idle_t: float = 0.0
+        self.peak_levels: List[float] = [0.0] * 128
+        self.peak_hold_frames: List[int] = [0] * 128
 
         self._load_directory(self.current_dir)
 
@@ -324,7 +326,16 @@ class PulseApp:
         self._render_header(w)
 
         # 2. Main File & Queue Split View
-        main_h = h - 11
+        if h >= 28:
+            vis_h = 7
+        elif h >= 24:
+            vis_h = 6
+        else:
+            vis_h = 5
+
+        tele_h = 4
+        main_h = max(6, h - vis_h - tele_h - 3)
+
         if w >= 80:
             left_w = w // 2
             right_w = w - left_w
@@ -338,11 +349,11 @@ class PulseApp:
 
         # 3. Retro 1-Bit Spectrum Analyzer
         vis_y = 2 + main_h
-        self._render_spectrum_box(vis_y, 0, 4, w)
+        self._render_spectrum_box(vis_y, 0, vis_h, w)
 
         # 4. Playback Scrubber & Telemetry Box
-        tele_y = vis_y + 4
-        self._render_telemetry_box(tele_y, 0, 4, w)
+        tele_y = vis_y + vis_h
+        self._render_telemetry_box(tele_y, 0, tele_h, w)
 
         # 5. Bottom Solid Command Strip
         self._render_footer(h - 1, w)
@@ -481,22 +492,45 @@ class PulseApp:
         self._safe_addstr(top + height - 1, left, "└" + ("─" * (width - 2)) + "┘", box_attr)
 
     def _render_spectrum_box(self, top: int, left: int, height: int, width: int) -> None:
-        """Render retro 1-bit hardware spectrum analyzer with peak dots."""
+        """Render retro 1-bit hardware spectrum analyzer with bold bars and peak dots."""
         title = "┌─[ SPECTRUM ANALYZER ]"
         rem_w = max(0, width - len(title) - 1)
         self._safe_addstr(top, left, f"{title}{'─' * rem_w}┐", curses.A_NORMAL)
 
         raw_levels = self.audio.get_visualizer_levels()
         is_playing = (self.audio.state == AudioState.PLAYING)
-        plot_h = height - 2  # internal rows
+        plot_h = max(2, height - 2)  # internal rows
 
-        # Calculate columns (each bar width: 2 chars)
         inner_w = width - 4
-        num_bars = min(len(raw_levels), inner_w // 2)
+        bar_w = 2  # Each bar is 2 characters wide
+        bar_stride = bar_w + 1  # 2 columns bar + 1 column gap
+        num_bars = min(64, inner_w // bar_stride)
+        if num_bars <= 0:
+            return
+
+        # Resample / interpolate raw_levels across num_bars
+        levels = []
+        if is_playing and raw_levels:
+            raw_len = len(raw_levels)
+            for b in range(num_bars):
+                src_idx = int(b * raw_len / num_bars)
+                levels.append(raw_levels[min(raw_len - 1, src_idx)])
+        else:
+            # Animated 1-bit hardware oscilloscope wave when idle / stopped
+            self.idle_t += 0.08
+            for b in range(num_bars):
+                w1 = math.sin(self.idle_t + (b * 0.25)) * 0.28
+                w2 = math.cos((self.idle_t * 0.7) + (b * 0.5)) * 0.15
+                val = max(0.12, min(0.95, 0.45 + w1 + w2))
+                levels.append(val)
 
         # Update peak hold decay
+        while len(self.peak_levels) < num_bars:
+            self.peak_levels.append(0.0)
+            self.peak_hold_frames.append(0)
+
         for b in range(num_bars):
-            lvl = raw_levels[b] if is_playing else 0.04
+            lvl = levels[b]
             if lvl >= self.peak_levels[b]:
                 self.peak_levels[b] = lvl
                 self.peak_hold_frames[b] = 8
@@ -512,7 +546,7 @@ class PulseApp:
             row_cells = []
 
             for b in range(num_bars):
-                val = raw_levels[b] if is_playing else 0.04
+                val = levels[b]
                 bar_h = val * plot_h
                 fill = bar_h - line_row
 
@@ -521,20 +555,21 @@ class PulseApp:
                 is_peak = (peak_row == line_row and peak_row > 0)
 
                 if fill >= 1.0:
-                    char = "█"
+                    char = "█" * bar_w
                 elif fill > 0.0:
-                    char = self.BLOCKS[min(8, max(0, int(fill * 8)))]
+                    idx = min(8, max(0, int(fill * 8)))
+                    char = self.BLOCKS[idx] * bar_w
                 elif is_peak:
-                    char = "▀"
+                    char = "▀" * bar_w
                 else:
-                    char = " "
-                row_cells.append(f"{char} ")
+                    char = " " * bar_w
+                row_cells.append(char + " ")
 
             spectrum_line = "".join(row_cells)
             pad_left = max(0, (inner_w - len(spectrum_line)) // 2)
             pad_right = max(0, inner_w - len(spectrum_line) - pad_left)
             full_line = "│ " + (" " * pad_left) + spectrum_line + (" " * pad_right) + " │"
-            self._safe_addstr(row_y, left, full_line, curses.A_BOLD if line_row == 0 else curses.A_NORMAL)
+            self._safe_addstr(row_y, left, full_line, curses.A_BOLD if line_row <= 1 else curses.A_NORMAL)
 
         self._safe_addstr(top + height - 1, left, "└" + ("─" * (width - 2)) + "┘", curses.A_NORMAL)
 
