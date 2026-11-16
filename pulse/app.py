@@ -1,331 +1,634 @@
-"""Main Textual Application for Pulse CLI."""
+"""Pure Unix terminal interface for Pulse CLI using standard curses."""
 
 from __future__ import annotations
 
+import curses
+import os
+import sys
+import time
 from pathlib import Path
-from typing import Optional
-
-from rich.markdown import Markdown
-from textual.app import App, ComposeResult
-from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Static
+from typing import List, Optional, Tuple
 
 from pulse.audio import AudioEngine, AudioState
-from pulse.metadata import TrackMetadata
-from pulse.queue_manager import QueueManager
-from pulse.widgets.file_browser import FileBrowserWidget
-from pulse.widgets.player_card import PlayerCardWidget
-from pulse.widgets.queue_view import QueueViewWidget
-from pulse.widgets.visualizer import VisualizerWidget
+from pulse.metadata import TrackMetadata, format_duration
+from pulse.queue_manager import QueueManager, RepeatMode
 
 
-HELP_MARKDOWN = """
-### ⚡ Playback Controls
-- **`Space`**: Play / Pause audio
-- **`←` / `→`**: Seek Backward / Forward **5s**
-- **`Shift + ←` / `Shift + →`**: Seek Backward / Forward **15s**
-- **`↑` / `↓`**: Volume Up / Down **5%**
-- **`M`**: Mute / Unmute
-- **`N`**: Skip to Next track
-- **`P`**: Jump to Previous track
-- **`R`**: Cycle Repeat mode (*Off* → *Track* → *Queue*)
-- **`S`**: Toggle Shuffle mode (*On* / *Off*)
+class PulseApp:
+    """Pure terminal curses music player and library explorer."""
 
----
-
-### 📁 Library & Navigation
-- **`Enter`**: Play selected file or open folder
-- **`A`**: Add selected MP3 or entire folder to queue
-- **`/`**: Focus search filter input
-- **`Esc`**: Clear search filter or close dialogs
-- **`Tab`**: Switch focus between panels
-
----
-
-### 📑 Queue Management
-- **`Enter`** *(in Queue)*: Jump directly to selected track
-- **`D`** / **`Delete`**: Remove track from queue
-- **`C`**: Clear entire queue
-- **`?`**: Toggle this help screen
-- **`Q`**: Quit Pulse CLI
-"""
-
-
-class HelpModal(ModalScreen):
-    """Overlay modal showing shortcuts and controls."""
-
-    BINDINGS = [
-        Binding("escape", "dismiss", "Close", show=False),
-        Binding("q", "dismiss", "Close", show=False),
-        Binding("enter", "dismiss", "Close", show=False),
-    ]
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="dialog-container"):
-            yield Static("⚡ [bold #00f0ff]PULSE CLI SHORTCUTS & HELP[/bold #00f0ff] ⚡", id="dialog-title")
-            yield Static(Markdown(HELP_MARKDOWN), id="dialog-body")
-            yield Button("Got it (Esc)", id="dialog-close-btn")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss()
-
-
-class PulseApp(App):
-    """Pulse CLI - The Modern macOS Terminal MP3 Player."""
-
-    TITLE = "Pulse CLI"
-    SUB_TITLE = "Terminal MP3 Player"
-    CSS_PATH = "styles.tcss"
-
-    BINDINGS = [
-        Binding("space", "toggle_play", "Play/Pause", priority=True),
-        Binding("left", "seek_backward", "Seek -5s"),
-        Binding("right", "seek_forward", "Seek +5s"),
-        Binding("shift+left", "seek_back_fast", "Seek -15s", show=False),
-        Binding("shift+right", "seek_forward_fast", "Seek +15s", show=False),
-        Binding("up", "volume_up", "Vol +5%"),
-        Binding("down", "volume_down", "Vol -5%"),
-        Binding("m", "toggle_mute", "Mute"),
-        Binding("n", "next_track", "Next"),
-        Binding("p", "prev_track", "Prev"),
-        Binding("r", "cycle_repeat", "Repeat"),
-        Binding("s", "toggle_shuffle", "Shuffle"),
-        Binding("slash", "focus_search", "Search", priority=True),
-        Binding("a", "queue_selected", "Add Queue"),
-        Binding("d", "remove_from_queue", "Remove Track"),
-        Binding("delete", "remove_from_queue", "Remove Track", show=False),
-        Binding("c", "clear_queue", "Clear Queue"),
-        Binding("question_mark", "show_help", "Help"),
-        Binding("q", "quit_app", "Quit"),
-    ]
+    BLOCKS = [" ", " ", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
 
     def __init__(self, initial_path: Optional[Path | str] = None, auto_play_file: Optional[Path | str] = None):
-        super().__init__()
         self.initial_path = Path(initial_path).resolve() if initial_path else None
         self.auto_play_file = Path(auto_play_file).resolve() if auto_play_file else None
+
+        # Resolve starting directory
+        if self.initial_path and self.initial_path.is_dir():
+            self.current_dir = self.initial_path
+        elif self.auto_play_file:
+            self.current_dir = self.auto_play_file.parent
+        else:
+            music_dir = Path.home() / "Music"
+            self.current_dir = music_dir if music_dir.exists() else Path.cwd()
 
         self.audio = AudioEngine()
         self.queue = QueueManager()
 
-    def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
-        with Horizontal(id="main-container"):
-            with Vertical(id="left-panel"):
-                yield FileBrowserWidget(initial_path=self.initial_path, id="file-browser")
-            with Vertical(id="right-panel"):
-                yield PlayerCardWidget(id="player-card")
-                yield VisualizerWidget(id="visualizer")
-                yield QueueViewWidget(id="queue-view")
-        yield Footer()
+        # Browser state
+        self.browser_items: List[Tuple[str, Path, bool]] = []  # (display_name, path, is_dir)
+        self.browser_cursor: int = 0
+        self.browser_scroll: int = 0
+        self.filter_query: str = ""
+        self.is_filtering: bool = False
 
-    def on_mount(self) -> None:
-        """Initialize UI timer and auto-play requested file if provided."""
-        # 25 FPS update timer for fluid visualizer and progress bar
-        self.set_interval(0.04, self.on_tick)
+        # Queue view state
+        self.queue_cursor: int = 0
+        self.queue_scroll: int = 0
+
+        # Active pane: 0 = Browser, 1 = Queue
+        self.active_pane: int = 0
+        self.show_help: bool = False
+        self.status_message: str = ""
+        self.status_time: float = 0.0
+
+        # Initial populate
+        self._load_directory(self.current_dir)
 
         if self.auto_play_file and self.auto_play_file.exists():
             meta = TrackMetadata.from_path(self.auto_play_file)
             self.queue.add_track(meta)
             self.queue.current_index = 0
-            self._start_track(meta)
-            self._sync_queue_view()
+            self.audio.load_track(meta)
 
-    def on_tick(self) -> None:
-        """Periodic loop to update visualizer, scrubber, and check track transitions."""
-        # Check if current track ended
-        if self.audio.check_and_clear_finished():
-            self._handle_track_finished()
+    def set_status(self, msg: str) -> None:
+        self.status_message = msg
+        self.status_time = time.time()
 
-        # Audio progress and spectrum metrics
-        curr_sec, tot_sec, pct = self.audio.get_progress()
+    def _load_directory(self, path: Path) -> None:
+        """Scan directory for subdirectories and MP3 files."""
+        self.current_dir = path.resolve()
+        items: List[Tuple[str, Path, bool]] = []
+
+        # Add parent directory entry if not at root
+        if self.current_dir.parent != self.current_dir:
+            items.append((".. (parent directory)", self.current_dir.parent, True))
+
+        dirs: List[Tuple[str, Path, bool]] = []
+        files: List[Tuple[str, Path, bool]] = []
+
+        try:
+            for entry in self.current_dir.iterdir():
+                name = entry.name
+                if name.startswith(".") or name in ("node_modules", "__pycache__", "venv", ".venv"):
+                    continue
+
+                if self.filter_query and self.filter_query.lower() not in name.lower():
+                    continue
+
+                if entry.is_dir():
+                    dirs.append((f"{name}/", entry, True))
+                elif entry.is_file() and entry.suffix.lower() == ".mp3":
+                    files.append((name, entry, False))
+        except (PermissionError, OSError):
+            self.set_status(f"Permission denied: {self.current_dir}")
+
+        dirs.sort(key=lambda x: x[0].lower())
+        files.sort(key=lambda x: x[0].lower())
+
+        self.browser_items = items + dirs + files
+        self.browser_cursor = min(self.browser_cursor, max(0, len(self.browser_items) - 1))
+        self.browser_scroll = 0
+
+    def run(self) -> None:
+        """Launch curses wrapper."""
+        try:
+            curses.wrapper(self._main_loop)
+        finally:
+            self.audio.close()
+
+    def _init_colors(self) -> None:
+        """Configure curses terminal color palette."""
+        curses.start_color()
+        try:
+            curses.use_default_colors()
+            bg = -1
+        except Exception:
+            bg = curses.COLOR_BLACK
+
+        curses.init_pair(1, curses.COLOR_CYAN, bg)      # Accent / Primary
+        curses.init_pair(2, curses.COLOR_GREEN, bg)     # Playing / Success
+        curses.init_pair(3, curses.COLOR_YELLOW, bg)    # Directories / Warnings
+        curses.init_pair(4, curses.COLOR_MAGENTA, bg)   # Metadata
+        curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE)   # Active cursor
+        curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_CYAN)   # Top/Bottom status bar
+        curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Inactive cursor
+
+    def _main_loop(self, stdscr) -> None:
+        """Main curses event and redraw loop."""
+        self.stdscr = stdscr
+        curses.curs_set(0)
+        stdscr.timeout(40)  # 25 FPS non-blocking polling
+        self._init_colors()
+
+        while True:
+            # Check for track auto-advancement
+            if self.audio.check_and_clear_finished():
+                next_t = self.queue.next_track()
+                if next_t:
+                    self.audio.load_track(next_t)
+                else:
+                    self.audio.stop()
+
+            # Render screen frame
+            self._render()
+
+            # Process input
+            try:
+                ch = stdscr.getch()
+            except Exception:
+                ch = -1
+
+            if ch != -1:
+                if not self._handle_input(ch):
+                    break
+
+    def _handle_input(self, ch: int) -> bool:
+        """Handle key input. Return False to exit."""
+        if self.show_help:
+            self.show_help = False
+            return True
+
+        if self.is_filtering:
+            return self._handle_filter_input(ch)
+
+        # Global navigation & shortcuts
+        if ch in (ord('q'), ord('Q')):
+            return False
+
+        elif ch == ord('?'):
+            self.show_help = True
+
+        elif ch == ord(' '):
+            if self.audio.state == AudioState.STOPPED:
+                track = self.queue.current_track
+                if track:
+                    self.audio.load_track(track)
+                elif self.queue.count > 0:
+                    self.queue.current_index = 0
+                    self.audio.load_track(self.queue.tracks[0])
+            else:
+                self.audio.toggle_play_pause()
+
+        elif ch == ord('\t'):
+            # Toggle between Browser (0) and Queue (1)
+            self.active_pane = 1 - self.active_pane
+
+        elif ch in (ord('/'), ):
+            self.is_filtering = True
+            self.filter_query = ""
+
+        # Volume controls (+ / - / [ / ])
+        elif ch in (ord('+'), ord('='), ord(']')):
+            vol = self.audio.change_volume(0.05)
+            self.set_status(f"Volume: {int(vol * 100)}%")
+
+        elif ch in (ord('-'), ord('_'), ord('[')):
+            vol = self.audio.change_volume(-0.05)
+            self.set_status(f"Volume: {int(vol * 100)}%")
+
+        elif ch in (ord('m'), ord('M')):
+            muted = self.audio.toggle_mute()
+            self.set_status("Muted" if muted else f"Unmuted ({int(self.audio.volume * 100)}%)")
+
+        # Seeking (Left / Right or , / .)
+        elif ch in (curses.KEY_LEFT, ord(',')):
+            self.audio.seek(-5.0)
+
+        elif ch in (curses.KEY_RIGHT, ord('.')):
+            self.audio.seek(5.0)
+
+        # Track skipping
+        elif ch in (ord('n'), ord('N')):
+            next_t = self.queue.next_track()
+            if next_t:
+                self.audio.load_track(next_t)
+            else:
+                self.set_status("End of queue reached")
+
+        elif ch in (ord('p'), ord('P')):
+            prev_t = self.queue.prev_track()
+            if prev_t:
+                self.audio.load_track(prev_t)
+
+        elif ch in (ord('r'), ord('R')):
+            mode = self.queue.toggle_repeat()
+            self.set_status(f"{mode.label}")
+
+        elif ch in (ord('s'), ord('S')):
+            shuf = self.queue.toggle_shuffle()
+            self.set_status(f"Shuffle: {'On' if shuf else 'Off'}")
+
+        # Pane-specific inputs
+        if self.active_pane == 0:
+            self._handle_browser_input(ch)
+        else:
+            self._handle_queue_input(ch)
+
+        return True
+
+    def _handle_filter_input(self, ch: int) -> bool:
+        """Handle input while live search filter prompt is active."""
+        if ch in (10, 13, curses.KEY_ENTER):
+            self.is_filtering = False
+            self._load_directory(self.current_dir)
+        elif ch in (27, ):  # Escape
+            self.is_filtering = False
+            self.filter_query = ""
+            self._load_directory(self.current_dir)
+        elif ch in (curses.KEY_BACKSPACE, 127, 8):
+            self.filter_query = self.filter_query[:-1]
+            self._load_directory(self.current_dir)
+        elif 32 <= ch <= 126:
+            self.filter_query += chr(ch)
+            self._load_directory(self.current_dir)
+        return True
+
+    def _handle_browser_input(self, ch: int) -> None:
+        """Handle cursor and actions inside File Browser pane."""
+        count = len(self.browser_items)
+        if count == 0:
+            if ch in (curses.KEY_BACKSPACE, 127, 8, ord('h')):
+                if self.current_dir.parent != self.current_dir:
+                    self._load_directory(self.current_dir.parent)
+            return
+
+        if ch in (curses.KEY_UP, ord('k')):
+            self.browser_cursor = max(0, self.browser_cursor - 1)
+
+        elif ch in (curses.KEY_DOWN, ord('j')):
+            self.browser_cursor = min(count - 1, self.browser_cursor + 1)
+
+        elif ch == curses.KEY_PPAGE:  # Page Up
+            self.browser_cursor = max(0, self.browser_cursor - 10)
+
+        elif ch == curses.KEY_NPAGE:  # Page Down
+            self.browser_cursor = min(count - 1, self.browser_cursor + 10)
+
+        elif ch in (curses.KEY_BACKSPACE, 127, 8, ord('h')):
+            # Ascend to parent directory
+            if self.current_dir.parent != self.current_dir:
+                self._load_directory(self.current_dir.parent)
+
+        elif ch in (10, 13, curses.KEY_ENTER, ord('l')):
+            # Open directory or play file
+            name, path, is_dir = self.browser_items[self.browser_cursor]
+            if is_dir:
+                self._load_directory(path)
+            else:
+                meta = TrackMetadata.from_path(path)
+                idx = self.queue.add_track(meta)
+                self.queue.current_index = idx
+                self.audio.load_track(meta)
+
+        elif ch in (ord('a'), ord('A')):
+            # Add file or directory to queue
+            name, path, is_dir = self.browser_items[self.browser_cursor]
+            if is_dir:
+                added = 0
+                for f in sorted(list(path.glob("*.mp3")) + list(path.glob("*.MP3"))):
+                    self.queue.add_track(TrackMetadata.from_path(f))
+                    added += 1
+                self.set_status(f"Added {added} tracks from {path.name}/ to queue")
+            else:
+                meta = TrackMetadata.from_path(path)
+                self.queue.add_track(meta)
+                self.set_status(f"Added: {meta.title}")
+
+            # If stopped and empty, play immediately
+            if self.audio.state == AudioState.STOPPED and self.queue.current_index < 0:
+                self.queue.current_index = 0
+                t = self.queue.current_track
+                if t:
+                    self.audio.load_track(t)
+
+    def _handle_queue_input(self, ch: int) -> None:
+        """Handle cursor and actions inside Queue pane."""
+        count = self.queue.count
+        if count == 0:
+            return
+
+        if ch in (curses.KEY_UP, ord('k')):
+            self.queue_cursor = max(0, self.queue_cursor - 1)
+
+        elif ch in (curses.KEY_DOWN, ord('j')):
+            self.queue_cursor = min(count - 1, self.queue_cursor + 1)
+
+        elif ch in (10, 13, curses.KEY_ENTER):
+            track = self.queue.jump_to(self.queue_cursor)
+            if track:
+                self.audio.load_track(track)
+
+        elif ch in (ord('d'), ord('x'), curses.KEY_DC):
+            removed = self.queue.remove_at(self.queue_cursor)
+            if removed:
+                self.set_status(f"Removed: {removed.title}")
+            self.queue_cursor = min(self.queue_cursor, max(0, self.queue.count - 1))
+
+        elif ch in (ord('c'), ord('C')):
+            self.queue.clear()
+            self.audio.stop()
+            self.queue_cursor = 0
+            self.set_status("Queue cleared")
+
+    def _render(self) -> None:
+        """Render complete terminal screen layout."""
+        self.stdscr.erase()
+        h, w = self.stdscr.getmaxyx()
+
+        if h < 14 or w < 40:
+            self._safe_addstr(0, 0, "Terminal window too small. Resize to at least 80x24.")
+            self.stdscr.refresh()
+            return
+
+        if self.show_help:
+            self._render_help_screen(h, w)
+            self.stdscr.refresh()
+            return
+
+        # 1. Header Bar (Row 0)
+        self._render_header(w)
+
+        # 2. Split Main View (Rows 1 to H - 7)
+        main_h = h - 7
+        if w >= 80:
+            left_w = w // 2
+            right_w = w - left_w
+            self._render_browser_pane(1, 0, main_h, left_w)
+            self._render_queue_pane(1, left_w, main_h, right_w)
+        else:
+            if self.active_pane == 0:
+                self._render_browser_pane(1, 0, main_h, w)
+            else:
+                self._render_queue_pane(1, 0, main_h, w)
+
+        # 3. Separator (Row H - 7)
+        self._safe_addstr(h - 7, 0, "─" * w, curses.color_pair(1))
+
+        # 4. Live Spectrum Visualizer (Rows H - 6 to H - 4)
+        self._render_visualizer(h - 6, 0, 3, w)
+
+        # 5. Playback & Progress Status (Row H - 3)
+        self._render_playback_line(h - 3, w)
+
+        # 6. Status / Messages (Row H - 2)
+        self._render_status_line(h - 2, w)
+
+        # 7. Hotkey Bar (Row H - 1)
+        self._render_footer(h - 1, w)
+
+        self.stdscr.refresh()
+
+    def _safe_addstr(self, y: int, x: int, text: str, attr: int = 0) -> None:
+        """Safely write string inside terminal boundaries."""
+        h, w = self.stdscr.getmaxyx()
+        if y < 0 or y >= h or x < 0 or x >= w:
+            return
+        max_len = w - x
+        if max_len <= 0:
+            return
+        try:
+            self.stdscr.addstr(y, x, text[:max_len], attr)
+        except curses.error:
+            pass
+
+    def _render_header(self, w: int) -> None:
+        """Render top system header bar."""
+        path_str = str(self.current_dir)
+        header_text = f" PULSE CLI ── {path_str} "
+        self._safe_addstr(0, 0, " " * w, curses.color_pair(6))
+        self._safe_addstr(0, 0, header_text, curses.color_pair(6) | curses.A_BOLD)
+        help_hint = "[?] Help  [q] Quit "
+        if w > len(header_text) + len(help_hint):
+            self._safe_addstr(0, w - len(help_hint), help_hint, curses.color_pair(6))
+
+    def _render_browser_pane(self, top: int, left: int, height: int, width: int) -> None:
+        """Render file browser directory tree."""
+        is_active = (self.active_pane == 0)
+        border_attr = curses.color_pair(1) | curses.A_BOLD if is_active else curses.A_DIM
+
+        # Header title
+        filter_str = f" [Filter: {self.filter_query}]" if self.filter_query else ""
+        title = f" [1: FILES ({len(self.browser_items)}){filter_str}] "
+        self._safe_addstr(top, left, title, border_attr)
+
+        content_h = height - 1
+        count = len(self.browser_items)
+
+        # Adjust scroll offset to keep cursor in view
+        if self.browser_cursor < self.browser_scroll:
+            self.browser_scroll = self.browser_cursor
+        elif self.browser_cursor >= self.browser_scroll + content_h:
+            self.browser_scroll = self.browser_cursor - content_h + 1
+
+        for idx in range(content_h):
+            row_y = top + 1 + idx
+            item_idx = self.browser_scroll + idx
+
+            if item_idx < count:
+                name, path, is_dir = self.browser_items[item_idx]
+                is_selected = (item_idx == self.browser_cursor)
+
+                if is_selected and is_active:
+                    attr = curses.color_pair(5) | curses.A_BOLD
+                elif is_selected:
+                    attr = curses.color_pair(7) | curses.A_BOLD
+                elif is_dir:
+                    attr = curses.color_pair(3) | curses.A_BOLD  # Yellow for folders
+                else:
+                    attr = curses.color_pair(1)                  # Cyan for MP3s
+
+                prefix = "> " if is_selected else "  "
+                display = f"{prefix}{name}"
+                # Pad to fill line
+                line_str = f"{display:<{width - 2}}"
+                self._safe_addstr(row_y, left, line_str, attr)
+            else:
+                self._safe_addstr(row_y, left, " " * (width - 1))
+
+        # Vertical divider line on right if side-by-side
+        if left + width < self.stdscr.getmaxyx()[1]:
+            for r in range(height):
+                self._safe_addstr(top + r, left + width - 1, "│", curses.A_DIM)
+
+    def _render_queue_pane(self, top: int, left: int, height: int, width: int) -> None:
+        """Render interactive queue / playlist table."""
+        is_active = (self.active_pane == 1)
+        border_attr = curses.color_pair(1) | curses.A_BOLD if is_active else curses.A_DIM
+
+        # Header title
+        title = f" [2: QUEUE ({self.queue.count} tracks)] "
+        self._safe_addstr(top, left, title, border_attr)
+
+        content_h = height - 1
+        count = self.queue.count
+
+        if self.queue_cursor < self.queue_scroll:
+            self.queue_scroll = self.queue_cursor
+        elif self.queue_cursor >= self.queue_scroll + content_h:
+            self.queue_scroll = self.queue_cursor - content_h + 1
+
+        for idx in range(content_h):
+            row_y = top + 1 + idx
+            item_idx = self.queue_scroll + idx
+
+            if item_idx < count:
+                track = self.queue.tracks[item_idx]
+                is_selected = (item_idx == self.queue_cursor)
+                is_playing = (item_idx == self.queue.current_index)
+
+                if is_selected and is_active:
+                    attr = curses.color_pair(5) | curses.A_BOLD
+                elif is_selected:
+                    attr = curses.color_pair(7) | curses.A_BOLD
+                elif is_playing:
+                    attr = curses.color_pair(2) | curses.A_BOLD
+                else:
+                    attr = curses.A_NORMAL
+
+                state_icon = "▶" if is_playing else " "
+                num_str = f"{item_idx + 1:2d}."
+                dur_str = track.formatted_duration
+                max_title_len = max(10, width - 18)
+                title_str = track.title[:max_title_len]
+
+                line = f" {state_icon} {num_str} {title_str:<{max_title_len}} {dur_str:>6s} "
+                self._safe_addstr(row_y, left, f"{line:<{width}}", attr)
+            else:
+                self._safe_addstr(row_y, left, " " * width)
+
+    def _render_visualizer(self, top: int, left: int, height: int, width: int) -> None:
+        """Render multi-band dynamic spectrum equalizer."""
         levels = self.audio.get_visualizer_levels()
         is_playing = (self.audio.state == AudioState.PLAYING)
 
-        # Update visualizer
-        vis = self.query_one("#visualizer", VisualizerWidget)
-        vis.update_visualizer(levels, is_playing)
+        num_bars = min(len(levels), width // 2)
+        if num_bars <= 0:
+            return
 
-        # Update player card
-        card = self.query_one("#player-card", PlayerCardWidget)
-        card.update_player(
-            track=self.queue.current_track,
-            state=self.audio.state,
-            current_sec=curr_sec,
-            total_sec=tot_sec,
-            pct=pct,
-            volume=self.audio.volume,
-            muted=self.audio.is_muted,
-            repeat_label=self.queue.repeat_mode.label,
-            shuffle=self.queue.is_shuffled,
-        )
+        for row in range(height):
+            y = top + row
+            line_row = height - 1 - row  # from bottom to top
+            row_chars = []
 
-    def _start_track(self, track: TrackMetadata) -> None:
-        """Load and start playback of a track."""
-        success = self.audio.load_track(track)
-        if success:
-            self.notify(f"Playing: {track.title}", title="Pulse CLI", severity="information")
-        else:
-            self.notify(f"Could not decode: {track.path.name}", title="Playback Error", severity="error")
-        self._sync_queue_view()
+            for b in range(num_bars):
+                val = levels[b] if is_playing else 0.05
+                bar_h = val * height
+                fill = bar_h - line_row
 
-    def _handle_track_finished(self) -> None:
-        """Automatically advance to next track when finished."""
-        next_t = self.queue.next_track()
-        if next_t:
-            self._start_track(next_t)
-        else:
-            self.audio.stop()
-            self._sync_queue_view()
+                if fill >= 1.0:
+                    char = self.BLOCKS[8]
+                elif fill > 0.0:
+                    char = self.BLOCKS[min(8, max(0, int(fill * 8)))]
+                else:
+                    char = " "
+                row_chars.append(f"{char} ")
 
-    def _sync_queue_view(self) -> None:
-        """Update queue widget display."""
-        queue_view = self.query_one("#queue-view", QueueViewWidget)
-        queue_view.update_queue(self.queue.tracks, self.queue.current_index)
+            spectrum_line = "".join(row_chars)
+            # Center visualizer
+            pad = max(0, (width - len(spectrum_line)) // 2)
+            color = curses.color_pair(2) if line_row == 0 else curses.color_pair(1)
+            self._safe_addstr(y, pad, spectrum_line, color | curses.A_BOLD)
 
-    # --- Event Handlers from Child Widgets ---
+    def _render_playback_line(self, y: int, width: int) -> None:
+        """Render Now Playing track details, time scrubber, and bitrate."""
+        track = self.queue.current_track
+        curr_sec, tot_sec, pct = self.audio.get_progress()
 
-    def on_file_browser_widget_track_play_requested(self, event: FileBrowserWidget.TrackPlayRequested) -> None:
-        """Handle immediate play request from file browser."""
-        meta = TrackMetadata.from_path(event.path)
-        idx = self.queue.add_track(meta)
-        self.queue.current_index = idx
-        self._start_track(meta)
-
-    def on_file_browser_widget_track_queue_requested(self, event: FileBrowserWidget.TrackQueueRequested) -> None:
-        """Handle queue request for a file or entire directory."""
-        path = event.path
-        added_count = 0
-
-        if path.is_file() and path.suffix.lower() == ".mp3":
-            meta = TrackMetadata.from_path(path)
-            self.queue.add_track(meta)
-            added_count = 1
-        elif path.is_dir():
-            # Scan directory for all MP3s
-            mp3_files = sorted(
-                list(path.glob("*.mp3")) + list(path.glob("*.MP3"))
-            )
-            for f in mp3_files:
-                meta = TrackMetadata.from_path(f)
-                self.queue.add_track(meta)
-                added_count += 1
-
-        if added_count > 0:
-            self.notify(f"Added {added_count} track(s) to queue", title="Queue")
-            # If nothing currently playing, start the first queued item
-            if self.audio.state == AudioState.STOPPED and self.queue.current_index < 0:
-                self.queue.current_index = 0
-                first_track = self.queue.current_track
-                if first_track:
-                    self._start_track(first_track)
-            self._sync_queue_view()
-
-    def on_queue_view_widget_track_selected(self, event: QueueViewWidget.TrackSelected) -> None:
-        """Handle direct jump to track from queue table."""
-        track = self.queue.jump_to(event.index)
         if track:
-            self._start_track(track)
+            state_str = "PLAYING" if self.audio.state == AudioState.PLAYING else "PAUSED"
+            if self.audio.state == AudioState.STOPPED:
+                state_str = "STOPPED"
 
-    def on_queue_view_widget_track_remove_requested(self, event: QueueViewWidget.TrackRemoveRequested) -> None:
-        """Handle track removal from queue table."""
-        removed = self.queue.remove_at(event.index)
-        if removed:
-            self.notify(f"Removed: {removed.title}", title="Queue")
-            self._sync_queue_view()
+            state_color = curses.color_pair(2) if state_str == "PLAYING" else curses.color_pair(3)
+            title = f"{track.artist} - {track.title}" if track.artist != "Unknown Artist" else track.title
+            curr_str = format_duration(curr_sec)
+            tot_str = format_duration(tot_sec)
 
-    def on_queue_view_widget_clear_queue_requested(self, event: QueueViewWidget.ClearQueueRequested) -> None:
-        """Handle queue clearing."""
-        self.queue.clear()
-        self.audio.stop()
-        self.notify("Queue cleared", title="Queue")
-        self._sync_queue_view()
-
-    # --- App Actions & Keybindings ---
-
-    def action_toggle_play(self) -> None:
-        """Toggle playback."""
-        if self.audio.state == AudioState.STOPPED:
-            track = self.queue.current_track
-            if track:
-                self._start_track(track)
-            elif self.queue.count > 0:
-                self.queue.current_index = 0
-                self._start_track(self.queue.tracks[0])
+            # High resolution scrubber bar
+            bar_w = max(10, min(30, width - 60))
+            if tot_sec > 0:
+                pos = int((curr_sec / tot_sec) * (bar_w - 1))
+                bar_str = "=" * pos + ">" + "-" * (bar_w - 1 - pos)
             else:
-                self.notify("No song loaded. Select an MP3 from explorer.", title="Pulse")
+                bar_str = "-" * bar_w
+
+            line = f" [{state_str}] {title}   {curr_str} / {tot_str} [{bar_str}] ({pct:4.1f}%)"
+            if track.bitrate > 0:
+                line += f"  {track.bitrate}k"
+            self._safe_addstr(y, 0, f"{line:<{width}}", curses.A_BOLD)
         else:
-            self.audio.toggle_play_pause()
+            self._safe_addstr(y, 0, f" [STOPPED] No track loaded. Select an MP3 to play.{' ':<{width}}", curses.A_DIM)
 
-    def action_seek_forward(self) -> None:
-        new_pos = self.audio.seek(5.0)
+    def _render_status_line(self, y: int, width: int) -> None:
+        """Render volume, loop/shuffle mode, and flash messages."""
+        if self.is_filtering:
+            prompt = f" Search Filter: {self.filter_query}_  (Press Enter to confirm, Esc to clear)"
+            self._safe_addstr(y, 0, f"{prompt:<{width}}", curses.color_pair(3) | curses.A_BOLD)
+            return
 
-    def action_seek_backward(self) -> None:
-        new_pos = self.audio.seek(-5.0)
+        now = time.time()
+        if self.status_message and (now - self.status_time < 3.0):
+            self._safe_addstr(y, 0, f" >>> {self.status_message}{' ':<{width}}", curses.color_pair(2) | curses.A_BOLD)
+            return
 
-    def action_seek_forward_fast(self) -> None:
-        new_pos = self.audio.seek(15.0)
+        vol_str = "MUTED" if self.audio.is_muted else f"{int(self.audio.volume * 100)}%"
+        rep_str = self.queue.repeat_mode.label
+        shuf_str = "On" if self.queue.is_shuffled else "Off"
+        status = f" Volume: {vol_str}  │  {rep_str}  │  Shuffle: {shuf_str}"
+        self._safe_addstr(y, 0, f"{status:<{width}}", curses.A_NORMAL)
 
-    def action_seek_back_fast(self) -> None:
-        new_pos = self.audio.seek(-15.0)
+    def _render_footer(self, y: int, width: int) -> None:
+        """Render bottom command shortcuts reference line."""
+        shortcuts = " [Space] Pause  [Enter] Play  [a] Add  [Tab] Pane  [h/l] Nav  [<-/->] Seek  [+/-] Vol  [?] Help  [q] Quit "
+        self._safe_addstr(y, 0, " " * width, curses.color_pair(6))
+        self._safe_addstr(y, 0, shortcuts[:width], curses.color_pair(6) | curses.A_BOLD)
 
-    def action_volume_up(self) -> None:
-        vol = self.audio.change_volume(0.05)
-        self.notify(f"Volume: {int(vol * 100)}%", title="Audio", timeout=1.0)
+    def _render_help_screen(self, h: int, w: int) -> None:
+        """Render internal keyboard reference overlay."""
+        box_w = min(74, w - 4)
+        box_h = min(22, h - 4)
+        top = (h - box_h) // 2
+        left = (w - box_w) // 2
 
-    def action_volume_down(self) -> None:
-        vol = self.audio.change_volume(-0.05)
-        self.notify(f"Volume: {int(vol * 100)}%", title="Audio", timeout=1.0)
+        for r in range(box_h):
+            self._safe_addstr(top + r, left, " " * box_w, curses.color_pair(5))
 
-    def action_toggle_mute(self) -> None:
-        muted = self.audio.toggle_mute()
-        msg = "Audio Muted" if muted else f"Audio Unmuted ({int(self.audio.volume * 100)}%)"
-        self.notify(msg, title="Audio", timeout=1.0)
+        lines = [
+            "PULSE CLI: KEYBOARD CONTROLS REFERENCE",
+            "─────────────────────────────────────────────────────────────",
+            "PLAYBACK:",
+            "  Space          Toggle Play / Pause",
+            "  Left / Right   Seek backward / forward 5 seconds",
+            "  + / -          Increase / decrease volume by 5%",
+            "  m              Mute / unmute audio",
+            "  n / p          Next / Previous track in queue",
+            "  r              Cycle Repeat mode (Off -> Track -> Queue)",
+            "  s              Toggle Shuffle mode",
+            "",
+            "NAVIGATION & LIBRARY:",
+            "  j / k (or Up/Down)  Move cursor selection",
+            "  Enter               Open directory or play file immediately",
+            "  Backspace / h       Go up to parent directory",
+            "  a                   Add file or entire folder to queue",
+            "  Tab                 Switch focus between Files and Queue",
+            "  /                   Activate search filter",
+            "  d / x               Remove track from queue",
+            "  c                   Clear entire queue",
+            "  q                   Quit Pulse CLI",
+            "─────────────────────────────────────────────────────────────",
+            "Press any key to close this help screen...",
+        ]
 
-    def action_next_track(self) -> None:
-        track = self.queue.next_track()
-        if track:
-            self._start_track(track)
-        else:
-            self.notify("Reached end of queue", title="Queue")
-
-    def action_prev_track(self) -> None:
-        track = self.queue.prev_track()
-        if track:
-            self._start_track(track)
-
-    def action_cycle_repeat(self) -> None:
-        mode = self.queue.toggle_repeat()
-        self.notify(f"{mode.label}", title="Playback Mode", timeout=1.5)
-
-    def action_toggle_shuffle(self) -> None:
-        shuf = self.queue.toggle_shuffle()
-        msg = "Shuffle: On" if shuf else "Shuffle: Off"
-        self.notify(msg, title="Playback Mode", timeout=1.5)
-
-    def action_focus_search(self) -> None:
-        browser = self.query_one("#file-browser", FileBrowserWidget)
-        browser.focus_search()
-
-    def action_queue_selected(self) -> None:
-        browser = self.query_one("#file-browser", FileBrowserWidget)
-        browser.queue_current_selection()
-
-    def action_remove_from_queue(self) -> None:
-        queue_widget = self.query_one("#queue-view", QueueViewWidget)
-        queue_widget.remove_selected()
-
-    def action_clear_queue(self) -> None:
-        queue_widget = self.query_one("#queue-view", QueueViewWidget)
-        queue_widget.clear_queue()
-
-    def action_show_help(self) -> None:
-        self.push_screen(HelpModal())
-
-    def action_quit_app(self) -> None:
-        self.audio.close()
-        self.exit()
-
-    def on_unmount(self) -> None:
-        self.audio.close()
+        for idx, line in enumerate(lines[:box_h - 2]):
+            self._safe_addstr(top + 1 + idx, left + 2, line, curses.color_pair(5) | curses.A_BOLD)
