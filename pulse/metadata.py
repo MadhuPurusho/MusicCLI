@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import atexit
 import base64
+import collections
 import concurrent.futures
 import hashlib
 import io
@@ -36,12 +38,24 @@ except ImportError:
 
 
 SUPPORTED_EXTENSIONS = {".mp3", ".flac"}
+MAX_METADATA_CACHE_ENTRIES = 2048
 
 # Background executor for non-blocking asynchronous cover fetches
 _COVER_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="pulse_cover")
 
-# Global thread-safe metadata cache keyed by (path_str, file_size, mtime)
-_METADATA_CACHE: Dict[Tuple[str, int, float], TrackMetadata] = {}
+
+def shutdown_cover_executor(wait: bool = False, cancel_futures: bool = True) -> None:
+    """Terminate the background cover artwork thread pool without blocking process exit."""
+    try:
+        _COVER_EXECUTOR.shutdown(wait=wait, cancel_futures=cancel_futures)
+    except Exception:
+        pass
+
+
+atexit.register(shutdown_cover_executor)
+
+# Global thread-safe bounded LRU metadata cache keyed by (path_str, file_size, mtime)
+_METADATA_CACHE: collections.OrderedDict[Tuple[str, int, float], TrackMetadata] = collections.OrderedDict()
 
 
 def format_duration(seconds: float | int) -> str:
@@ -173,7 +187,8 @@ class TrackMetadata:
             if ImageOps is not None:
                 im = ImageOps.autocontrast(im)
             resized = im.resize((width, height * 2), Image.Resampling.LANCZOS)
-            dithered = resized.convert("1")
+            dither_mode = getattr(getattr(Image, "Dither", None), "FLOYDSTEINBERG", 1)
+            dithered = resized.convert("1", dither=dither_mode)
             px = dithered.load()
 
             lines = []
@@ -285,7 +300,9 @@ class TrackMetadata:
 
         cache_key = (str(path), file_size, mtime)
         if cache_key in _METADATA_CACHE:
-            return _METADATA_CACHE[cache_key]
+            instance = _METADATA_CACHE[cache_key]
+            _METADATA_CACHE.move_to_end(cache_key)
+            return instance
 
         ext = path.suffix.lower()
         file_format = "FLAC" if ext == ".flac" else "MP3"
@@ -564,5 +581,7 @@ class TrackMetadata:
         if fetch_online and query_for_online and not instance.has_cover:
             instance._fetch_online_cover_async(query_for_online)
 
+        if len(_METADATA_CACHE) >= MAX_METADATA_CACHE_ENTRIES:
+            _METADATA_CACHE.popitem(last=False)
         _METADATA_CACHE[cache_key] = instance
         return instance

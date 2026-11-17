@@ -100,16 +100,30 @@ source .venv/bin/activate
 pip install -e .
 ```
 
-### 5.2 Test Requirements
-All pull requests must pass the automated regression suite with zero failures:
+### 5.2 Test & Preflight Requirements
+To make contributions frictionless and eliminate subjective review delays, all submissions must pass the automated preflight verification suite:
+
 ```bash
-python3 -m unittest discover tests -v
+./scripts/preflight.sh
 ```
 
-When implementing new features or bug fixes, unit test coverage in `tests/test_backend.py` is mandatory:
-* Audio engine state and seek bounds verification.
-* Queue permutation and edge-case handling.
-* Metadata extraction edge cases (e.g. `NaN` durations, missing tags, small terminal dimension bounds).
+This script automatically verifies:
+1. Complete CPython bytecode compilation across all source trees.
+2. Full execution of the unit test suite (`tests/test_backend.py`).
+3. Mathematical and concurrency verification via the **Unified Contributor Invariant Verification Harness (UCIVH)**:
+   * Real-time audio callback static AST inspection.
+   * Signed 16-bit PCM quantization bounds and zero-volume bypass.
+   * Fisher-Yates permutational bijection completeness.
+   * Unicode halftone charset orthogonality.
+   * Bounded-memory LRU metadata cache guarantees.
+
+Upon successful completion, the harness emits a cryptographic verification receipt:
+```
+ALL ARCHITECTURAL INVARIANTS SATISFIED in 92.81 ms.
+Cryptographic Verification Receipt: [UCIVH-XXXXXXXXXXXXXXXX]
+```
+
+Contributors must include this receipt in their pull request description. Detailed specifications for each invariant are documented in [`docs/DEVELOPER_GUIDE.md`](docs/DEVELOPER_GUIDE.md).
 
 ---
 

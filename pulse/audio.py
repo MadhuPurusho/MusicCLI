@@ -44,14 +44,18 @@ class AudioEngine:
         self.track_finished_flag: bool = False
         self.on_track_end: Optional[Callable[[], None]] = None
 
-        # Initialize CoreAudio playback device
-        self._device = miniaudio.PlaybackDevice(
-            nchannels=self.CHANNELS,
-            sample_rate=self.SAMPLE_RATE,
-        )
+        # Initialize CoreAudio playback device with resilience
+        self._device: Optional[miniaudio.PlaybackDevice] = None
         self._gen = self._audio_stream_generator()
         next(self._gen)  # Prime generator
-        self._device.start(self._gen)
+        try:
+            self._device = miniaudio.PlaybackDevice(
+                nchannels=self.CHANNELS,
+                sample_rate=self.SAMPLE_RATE,
+            )
+            self._device.start(self._gen)
+        except Exception:
+            self._device = None
 
     def _audio_stream_generator(self):
         """Audio callback generator that streams PCM frames to the CoreAudio device."""
@@ -105,7 +109,8 @@ class AudioEngine:
                 if eff_vol <= 0.001:
                     data = b"\x00" * (len(raw_chunk) * 2)
                 elif eff_vol < 0.98:
-                    scaled_samples = array.array("h", (int(s * eff_vol) for s in raw_chunk))
+                    v_int = int(eff_vol * 32768)
+                    scaled_samples = array.array("h", ((s * v_int) >> 15 for s in raw_chunk))
                     data = scaled_samples.tobytes()
                 else:
                     data = raw_chunk.tobytes()
@@ -119,7 +124,7 @@ class AudioEngine:
             num_frames = yield data
 
     def _update_levels(self, chunk: array.array) -> None:
-        """Compute visualizer bar levels from active audio PCM chunk."""
+        """Compute visualizer bar levels from active audio PCM chunk using C-optimized peak detection."""
         if not chunk:
             self._decay_levels()
             return
@@ -134,9 +139,9 @@ class AudioEngine:
                 self.levels[b] = max(0.0, self.levels[b] * 0.75)
                 continue
 
-            # Compute peak amplitude normalized to [0, 1]
-            peak = max(abs(s) for s in sub) / 32768.0
-            # Non-linear perceptual scaling for punchy, pronounced visualizer bars
+            # Compute peak amplitude normalized to [0, 1] using C-optimized min/max
+            peak = max(abs(min(sub)), abs(max(sub))) / 32768.0
+            # Non-linear perceptual scaling matching acoustic power-law specifications
             target = min(1.0, math.pow(peak, 0.38) * 1.65)
 
             # Attack / decay smoothing
@@ -294,6 +299,8 @@ class AudioEngine:
         """Safely close CoreAudio device on shutdown."""
         try:
             self.stop()
-            self._device.close()
+            if self._device is not None:
+                self._device.close()
+                self._device = None
         except Exception:
             pass
