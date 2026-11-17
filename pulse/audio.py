@@ -61,45 +61,62 @@ class AudioEngine:
             if num_frames is None or num_frames <= 0:
                 num_frames = 1024
 
-            eff_vol = 0.0 if self.is_muted else self.volume
+            raw_chunk = None
+            eff_vol = 0.0
+            finished_callback = None
 
             with self._lock:
-                if (
-                    self.state == AudioState.PLAYING
-                    and self._samples is not None
-                    and self._current_frame < self._total_frames
-                ):
-                    count = min(num_frames, self._total_frames - self._current_frame)
-                    start_idx = self._current_frame * self.CHANNELS
-                    end_idx = start_idx + (count * self.CHANNELS)
-                    raw_chunk = self._samples[start_idx:end_idx]
+                eff_vol = 0.0 if self.is_muted else self.volume
 
-                    # Update visualizer spectrum from raw samples before volume attenuation
-                    self._update_levels(raw_chunk)
-
-                    # Apply volume scaling
-                    if eff_vol < 0.98:
-                        scaled_samples = array.array("h", (int(s * eff_vol) for s in raw_chunk))
-                        data = scaled_samples.tobytes()
-                    else:
-                        data = raw_chunk.tobytes()
-
-                    # Handle end of song padding if chunk is smaller than buffer
-                    if count < num_frames:
-                        pad_frames = num_frames - count
-                        data += b"\x00" * (pad_frames * self.CHANNELS * 2)
+                if self.state == AudioState.PLAYING and self._samples is not None:
+                    if self._current_frame >= self._total_frames:
                         self.state = AudioState.STOPPED
-                        self._current_frame = self._total_frames
                         self.track_finished_flag = True
+                        self._decay_levels()
+                        finished_callback = self.on_track_end
                     else:
-                        self._current_frame += count
+                        count = min(num_frames, self._total_frames - self._current_frame)
+                        start_idx = self._current_frame * self.CHANNELS
+                        end_idx = start_idx + (count * self.CHANNELS)
+                        raw_chunk = self._samples[start_idx:end_idx]
 
-                    num_frames = yield data
+                        # Update visualizer spectrum from raw samples before volume attenuation
+                        self._update_levels(raw_chunk)
+
+                        if count < num_frames:
+                            self.state = AudioState.STOPPED
+                            self._current_frame = self._total_frames
+                            self.track_finished_flag = True
+                            finished_callback = self.on_track_end
+                        else:
+                            self._current_frame += count
                 else:
-                    # Silence when paused or stopped
                     self._decay_levels()
-                    silence = b"\x00" * (num_frames * self.CHANNELS * 2)
-                    num_frames = yield silence
+
+            # Trigger optional callback outside lock
+            if finished_callback:
+                try:
+                    finished_callback()
+                except Exception:
+                    pass
+
+            # Apply volume attenuation and padding outside lock to prevent contention
+            if raw_chunk is not None:
+                if eff_vol <= 0.001:
+                    data = b"\x00" * (len(raw_chunk) * 2)
+                elif eff_vol < 0.98:
+                    scaled_samples = array.array("h", (int(s * eff_vol) for s in raw_chunk))
+                    data = scaled_samples.tobytes()
+                else:
+                    data = raw_chunk.tobytes()
+
+                pad_frames = num_frames - (len(raw_chunk) // self.CHANNELS)
+                if pad_frames > 0:
+                    data += b"\x00" * (pad_frames * self.CHANNELS * 2)
+            else:
+                data = b"\x00" * (num_frames * self.CHANNELS * 2)
+
+            num_frames = yield data
 
     def _update_levels(self, chunk: array.array) -> None:
         """Compute visualizer bar levels from active audio PCM chunk."""
@@ -134,8 +151,10 @@ class AudioEngine:
             self.levels[b] = max(0.0, self.levels[b] * 0.72 - 0.02)
 
     def load_track(self, metadata: TrackMetadata) -> bool:
-        """Decode and load an MP3 track into memory."""
+        """Decode and load an MP3 or FLAC track into memory."""
         try:
+            if not metadata or not metadata.path.is_file():
+                return False
             decoded = miniaudio.decode_file(
                 str(metadata.path),
                 output_format=miniaudio.SampleFormat.SIGNED16,
@@ -149,6 +168,8 @@ class AudioEngine:
                 self.current_track = metadata
                 self.state = AudioState.PLAYING
                 self.track_finished_flag = False
+            if decoded.num_frames > 0:
+                metadata.duration = decoded.num_frames / self.SAMPLE_RATE
             return True
         except Exception:
             return False
@@ -181,6 +202,18 @@ class AudioEngine:
         with self._lock:
             self.state = AudioState.STOPPED
             self._current_frame = 0
+            self.track_finished_flag = False
+            self._decay_levels()
+
+    def unload(self) -> None:
+        """Stop playback and release loaded audio buffer from memory."""
+        with self._lock:
+            self.state = AudioState.STOPPED
+            self._samples = None
+            self._total_frames = 0
+            self._current_frame = 0
+            self.current_track = None
+            self.track_finished_flag = False
             self._decay_levels()
 
     def seek(self, delta_seconds: float) -> float:
@@ -190,6 +223,11 @@ class AudioEngine:
                 return 0.0
             delta_frames = int(delta_seconds * self.SAMPLE_RATE)
             self._current_frame = max(0, min(self._total_frames, self._current_frame + delta_frames))
+            if self._current_frame >= self._total_frames and self.state == AudioState.PLAYING:
+                self.state = AudioState.STOPPED
+                self.track_finished_flag = True
+            elif self._current_frame < self._total_frames:
+                self.track_finished_flag = False
             return self._current_frame / self.SAMPLE_RATE
 
     def seek_to(self, target_seconds: float) -> float:
@@ -199,6 +237,11 @@ class AudioEngine:
                 return 0.0
             target_frame = int(target_seconds * self.SAMPLE_RATE)
             self._current_frame = max(0, min(self._total_frames, target_frame))
+            if self._current_frame >= self._total_frames and self.state == AudioState.PLAYING:
+                self.state = AudioState.STOPPED
+                self.track_finished_flag = True
+            elif self._current_frame < self._total_frames:
+                self.track_finished_flag = False
             return self._current_frame / self.SAMPLE_RATE
 
     def set_volume(self, volume: float) -> float:
@@ -250,6 +293,7 @@ class AudioEngine:
     def close(self) -> None:
         """Safely close CoreAudio device on shutdown."""
         try:
+            self.stop()
             self._device.close()
         except Exception:
             pass

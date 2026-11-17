@@ -130,7 +130,7 @@ class PulseApp:
 
         while True:
             if self.audio.check_and_clear_finished():
-                next_t = self.queue.next_track()
+                next_t = self.queue.next_track(auto_advance=True)
                 if next_t:
                     self.audio.load_track(next_t)
                 else:
@@ -366,7 +366,7 @@ class PulseApp:
             self.queue_cursor = min(self.queue_cursor, max(0, self.queue.count - 1))
         elif ch in (ord('c'), ord('C')):
             self.queue.clear()
-            self.audio.stop()
+            self.audio.unload()
             self.queue_cursor = 0
             self.set_status("QUEUE: CLEARED")
 
@@ -644,7 +644,10 @@ class PulseApp:
 
             if row_offset < content_h and info_lines >= 3:
                 row_y = top + 1 + row_offset
-                fmt_tag = f"[{target.file_format} {target.bitrate}k / {target.sample_rate}Hz]"
+                if target.file_format == "FLAC":
+                    fmt_tag = f"[{target.file_format} {target.bits_per_sample}-bit {target.bitrate}k / {target.sample_rate}Hz]"
+                else:
+                    fmt_tag = f"[{target.file_format} {target.bitrate}k / {target.sample_rate}Hz]"
                 self._safe_addstr(row_y, left, "│ " + fmt_tag.center(inner_w - 2) + " │", curses.A_DIM)
                 row_offset += 1
 
@@ -915,7 +918,7 @@ class PulseApp:
             f"ARTIST:  {track.artist}",
             f"ALBUM:   {track.album}" + (f" ({track.year})" if track.year else ""),
             f"GENRE:   {track.genre}" if track.genre else "",
-            f"FORMAT:  {track.file_format} Lossless" if track.file_format == "FLAC" else f"FORMAT:  {track.file_format}",
+            f"FORMAT:  {track.file_format} Lossless ({track.bits_per_sample}-bit)" if track.file_format == "FLAC" else f"FORMAT:  {track.file_format}",
             f"SPECS:   {track.sample_rate} Hz / {track.channels}",
             f"BITRATE: {track.bitrate} kbps",
             source_notice,
