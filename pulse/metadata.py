@@ -6,6 +6,7 @@ import atexit
 import base64
 import collections
 import concurrent.futures
+from enum import Enum
 import hashlib
 import io
 import json
@@ -14,9 +15,11 @@ import os
 import re
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+from pulse.dsp import ReplayGain
 
 try:
     from PIL import Image, ImageOps
@@ -101,6 +104,198 @@ def _safe_tag_str(val) -> str:
     return str(val).strip()
 
 
+class DitherAlgorithm(Enum):
+    """Supported 1-bit monochrome halftone dithering algorithms."""
+    ATKINSON = "ATKINSON"
+    FLOYD_STEINBERG = "FLOYD_STEINBERG"
+    BAYER = "BAYER"
+
+    def next_algorithm(self) -> DitherAlgorithm:
+        algos = list(DitherAlgorithm)
+        idx = (algos.index(self) + 1) % len(algos)
+        return algos[idx]
+
+
+def _dither_atkinson(im: Image.Image, width: int, height: int) -> List[List[bool]]:
+    """Apply Bill Atkinson's 1984 Macintosh error-diffusion dithering.
+
+    Distributes 1/8 of quantization error to 6 neighboring pixels:
+    (x+1, y), (x+2, y), (x-1, y+1), (x, y+1), (x+1, y+1), (x, y+2).
+    Discards 2/8 (25%) of error to eliminate diffuse shadow mud and maintain
+    brilliant whites and punchy blacks on 1-bit displays.
+    """
+    raw = list(im.getdata())
+    buf = [[float(raw[y * width + x]) for x in range(width)] for y in range(height)]
+    result = [[False for _ in range(width)] for _ in range(height)]
+
+    for y in range(height):
+        for x in range(width):
+            old_val = buf[y][x]
+            new_val = 255.0 if old_val >= 128.0 else 0.0
+            result[y][x] = (new_val > 0.0)
+            err = (old_val - new_val) / 8.0
+
+            # Distribute 1/8 to neighbors
+            if x + 1 < width:
+                buf[y][x + 1] += err
+            if x + 2 < width:
+                buf[y][x + 2] += err
+
+            if y + 1 < height:
+                if x - 1 >= 0:
+                    buf[y + 1][x - 1] += err
+                buf[y + 1][x] += err
+                if x + 1 < width:
+                    buf[y + 1][x + 1] += err
+
+            if y + 2 < height:
+                buf[y + 2][x] += err
+
+    return result
+
+
+_BAYER_4X4 = [
+    [0, 8, 2, 10],
+    [12, 4, 14, 6],
+    [3, 11, 1, 9],
+    [15, 7, 13, 5],
+]
+
+
+def _dither_bayer(im: Image.Image, width: int, height: int) -> List[List[bool]]:
+    """Apply ordered Bayer 4x4 spatial threshold dithering."""
+    raw = list(im.getdata())
+    result = [[False for _ in range(width)] for _ in range(height)]
+    scale = 255.0 / 16.0
+
+    for y in range(height):
+        row_offset = y * width
+        for x in range(width):
+            thresh = (_BAYER_4X4[y % 4][x % 4] + 0.5) * scale
+            result[y][x] = (raw[row_offset + x] > thresh)
+
+    return result
+
+
+def _dither_floyd_steinberg(im: Image.Image, width: int, height: int) -> List[List[bool]]:
+    """Apply classic Floyd-Steinberg error diffusion (7/16, 3/16, 5/16, 1/16)."""
+    raw = list(im.getdata())
+    buf = [[float(raw[y * width + x]) for x in range(width)] for y in range(height)]
+    result = [[False for _ in range(width)] for _ in range(height)]
+
+    for y in range(height):
+        for x in range(width):
+            old_val = buf[y][x]
+            new_val = 255.0 if old_val >= 128.0 else 0.0
+            result[y][x] = (new_val > 0.0)
+            err = old_val - new_val
+
+            if x + 1 < width:
+                buf[y][x + 1] += err * (7.0 / 16.0)
+            if y + 1 < height:
+                if x - 1 >= 0:
+                    buf[y + 1][x - 1] += err * (3.0 / 16.0)
+                buf[y + 1][x] += err * (5.0 / 16.0)
+                if x + 1 < width:
+                    buf[y + 1][x + 1] += err * (1.0 / 16.0)
+
+    return result
+
+
+@dataclass
+class LyricsLine:
+    """Individual line of synchronized or unsynchronized lyrics."""
+    timestamp: float  # seconds
+    text: str
+
+    @property
+    def formatted_time(self) -> str:
+        return format_duration(self.timestamp)
+
+
+@dataclass
+class TrackLyrics:
+    """Collection of lyrics with synchronized temporal lookup."""
+    lines: List[LyricsLine]
+    is_synced: bool = True
+
+    def get_current_index(self, current_time: float) -> int:
+        """Find the index of the currently active lyric line."""
+        if not self.lines:
+            return -1
+        if not self.is_synced:
+            return 0
+        idx = 0
+        for i, line in enumerate(self.lines):
+            if line.timestamp <= current_time:
+                idx = i
+            else:
+                break
+        return idx
+
+    def get_window(self, current_time: float, max_lines: int = 7) -> List[Tuple[int, bool, LyricsLine]]:
+        """Return a window of (index, is_active, LyricsLine) centered around current time."""
+        if not self.lines:
+            return []
+        curr_idx = self.get_current_index(current_time) if self.is_synced else 0
+        half = max_lines // 2
+        start_idx = max(0, curr_idx - half)
+        end_idx = min(len(self.lines), start_idx + max_lines)
+        if end_idx - start_idx < max_lines and start_idx > 0:
+            start_idx = max(0, end_idx - max_lines)
+
+        window = []
+        for i in range(start_idx, end_idx):
+            is_active = (i == curr_idx and self.is_synced)
+            window.append((i, is_active, self.lines[i]))
+        return window
+
+
+_LRC_TIMESTAMP_RE = re.compile(r"\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]")
+
+
+def parse_lrc(text: str) -> Optional[TrackLyrics]:
+    """Parse standard .lrc or embedded timestamped lyrics string into TrackLyrics."""
+    if not text:
+        return None
+    lines: List[LyricsLine] = []
+    has_timestamps = False
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        matches = list(_LRC_TIMESTAMP_RE.finditer(line))
+        if matches:
+            has_timestamps = True
+            lyric_text = _LRC_TIMESTAMP_RE.sub("", line).strip()
+            for m in matches:
+                mins = int(m.group(1))
+                secs = int(m.group(2))
+                msec_str = m.group(3) or "0"
+                if len(msec_str) == 2:
+                    msecs = int(msec_str) * 10
+                elif len(msec_str) == 1:
+                    msecs = int(msec_str) * 100
+                else:
+                    msecs = int(msec_str[:3])
+                ts = mins * 60.0 + secs + (msecs / 1000.0)
+                lines.append(LyricsLine(timestamp=ts, text=lyric_text))
+        else:
+            # Skip ID tags like [ar: ...], [ti: ...]
+            if not (line.startswith("[") and ":" in line and line.endswith("]")):
+                lines.append(LyricsLine(timestamp=0.0, text=line))
+
+    if not lines:
+        return None
+
+    if has_timestamps:
+        lines.sort(key=lambda x: x.timestamp)
+        return TrackLyrics(lines=lines, is_synced=True)
+    else:
+        return TrackLyrics(lines=lines, is_synced=False)
+
+
 @dataclass
 class TrackMetadata:
     """Metadata and cover art details for an audio track."""
@@ -122,6 +317,8 @@ class TrackMetadata:
     cover_data: Optional[bytes] = None
     cover_mime: Optional[str] = None
     cover_source: str = ""  # "embedded", "folder", "online", or ""
+    lyrics: Optional[TrackLyrics] = None
+    replay_gain_db: float = 0.0
 
     @property
     def formatted_duration(self) -> str:
@@ -166,14 +363,19 @@ class TrackMetadata:
         lines.append(bot)
         return lines[:height]
 
-    def get_pixel_art(self, width: int = 14, height: int = 5) -> List[str]:
+    def get_pixel_art(
+        self,
+        width: int = 14,
+        height: int = 5,
+        algorithm: DitherAlgorithm = DitherAlgorithm.ATKINSON,
+    ) -> List[str]:
         """Generate a 1-bit monochrome pixel-art rendition of the actual album cover."""
         if width <= 0 or height <= 0:
             return []
 
         if not hasattr(self, "_pixel_art_cache"):
             self._pixel_art_cache = {}
-        cache_key = (width, height)
+        cache_key = (width, height, algorithm)
         if cache_key in self._pixel_art_cache:
             return self._pixel_art_cache[cache_key]
 
@@ -187,17 +389,21 @@ class TrackMetadata:
             if ImageOps is not None:
                 im = ImageOps.autocontrast(im)
             resized = im.resize((width, height * 2), Image.Resampling.LANCZOS)
-            dither_mode = getattr(getattr(Image, "Dither", None), "FLOYDSTEINBERG", 1)
-            dithered = resized.convert("1", dither=dither_mode)
-            px = dithered.load()
+
+            if algorithm == DitherAlgorithm.ATKINSON:
+                bit_grid = _dither_atkinson(resized, width, height * 2)
+            elif algorithm == DitherAlgorithm.BAYER:
+                bit_grid = _dither_bayer(resized, width, height * 2)
+            else:
+                bit_grid = _dither_floyd_steinberg(resized, width, height * 2)
 
             lines = []
             for y in range(0, height * 2, 2):
                 row = []
                 y_bot = y + 1
                 for x in range(width):
-                    top_px = (px[x, y] > 0)
-                    bot_px = (px[x, y_bot] > 0)
+                    top_px = bit_grid[y][x]
+                    bot_px = bit_grid[y_bot][x] if y_bot < height * 2 else False
                     if top_px and bot_px:
                         row.append("█")
                     elif top_px and not bot_px:
@@ -213,6 +419,73 @@ class TrackMetadata:
             res = TrackMetadata.empty_pixel_art(width, height)
             self._pixel_art_cache[cache_key] = res
             return res
+
+    def load_lyrics(self) -> Optional[TrackLyrics]:
+        """Load lyrics from adjacent .lrc file or embedded ID3/Vorbis tags."""
+        if self.lyrics is not None:
+            return self.lyrics
+
+        # 1. Adjacent .lrc file in track folder
+        if self.path.exists():
+            lrc_cand = self.path.with_suffix(".lrc")
+            if lrc_cand.is_file():
+                try:
+                    content = lrc_cand.read_text(encoding="utf-8", errors="replace")
+                    self.lyrics = parse_lrc(content)
+                    if self.lyrics:
+                        return self.lyrics
+                except Exception:
+                    pass
+
+        # 2. Embedded lyrics in FLAC Vorbis comments
+        if self.file_format == "FLAC" and FLAC is not None and self.path.exists():
+            try:
+                audio = FLAC(self.path)
+                if audio.tags:
+                    for k in ("lyrics", "LYRICS", "unsyncedlyrics", "UNSYNCEDLYRICS"):
+                        if k in audio.tags and audio.tags[k]:
+                            raw_text = str(audio.tags[k][0])
+                            self.lyrics = parse_lrc(raw_text)
+                            if self.lyrics:
+                                return self.lyrics
+            except Exception:
+                pass
+
+        # 3. Embedded lyrics in MP3 ID3 tags
+        elif self.file_format == "MP3" and MP3 is not None and self.path.exists():
+            try:
+                audio = MP3(self.path)
+                if audio.tags:
+                    # Check USLT frames
+                    try:
+                        uslt_frames = audio.tags.getall("USLT")
+                        for frame in uslt_frames:
+                            if hasattr(frame, "text") and frame.text:
+                                self.lyrics = parse_lrc(str(frame.text))
+                                if self.lyrics:
+                                    return self.lyrics
+                    except Exception:
+                        pass
+                    # Check SYLT frames
+                    try:
+                        sylt_frames = audio.tags.getall("SYLT")
+                        for frame in sylt_frames:
+                            if hasattr(frame, "text") and frame.text:
+                                sylt_lines = [
+                                    LyricsLine(timestamp=ts / 1000.0, text=txt)
+                                    for txt, ts in frame.text
+                                    if txt.strip()
+                                ]
+                                if sylt_lines:
+                                    sylt_lines.sort(key=lambda x: x.timestamp)
+                                    self.lyrics = TrackLyrics(lines=sylt_lines, is_synced=True)
+                                    return self.lyrics
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        return None
 
     def save_cover_temp(self) -> Optional[Path]:
         """Save cover art to a temporary file for viewing."""
@@ -320,6 +593,7 @@ class TrackMetadata:
         cover_data: Optional[bytes] = None
         cover_mime: Optional[str] = None
         cover_source: str = ""
+        replay_gain_db: float = 0.0
 
         # -------------------------------------------------------------
         # 1. Parse Metadata & Embedded Artwork
@@ -356,6 +630,8 @@ class TrackMetadata:
                             track_number = int(_safe_tag_str(v).split("/")[0])
                         except Exception:
                             pass
+                    elif kl in ("replaygain_track_gain", "replaygain_album_gain") and v:
+                        replay_gain_db = ReplayGain.parse_gain_db(_safe_tag_str(v))
 
                 # Extract embedded pictures from FLAC blocks
                 if getattr(audio, "pictures", None):
@@ -459,6 +735,13 @@ class TrackMetadata:
                             track_number = int(_safe_tag_str(trck).split("/")[0])
                         except Exception:
                             pass
+
+                    # Parse ReplayGain tags
+                    for rg_key in ("TXXX:replaygain_track_gain", "replaygain_track_gain", "TXXX:REPLAYGAIN_TRACK_GAIN"):
+                        rg_tag = tags.get(rg_key)
+                        if rg_tag:
+                            replay_gain_db = ReplayGain.parse_gain_db(_safe_tag_str(rg_tag))
+                            break
 
                     # Extract APIC / PIC cover art from ID3 tags
                     apic_frames = []
@@ -575,6 +858,7 @@ class TrackMetadata:
             cover_data=cover_data,
             cover_mime=cover_mime,
             cover_source=cover_source,
+            replay_gain_db=replay_gain_db,
         )
 
         # Trigger background online fetch without blocking from_path if needed

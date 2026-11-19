@@ -29,6 +29,7 @@ echo "--> STEP 1: Syntax & Bytecode Compilation Check..."
                               "${ROOT_DIR}/pulse/__main__.py" \
                               "${ROOT_DIR}/pulse/app.py" \
                               "${ROOT_DIR}/pulse/audio.py" \
+                              "${ROOT_DIR}/pulse/dsp.py" \
                               "${ROOT_DIR}/pulse/metadata.py" \
                               "${ROOT_DIR}/pulse/queue_manager.py"
 echo "    [SUCCESS] All Python source files compiled with zero bytecode errors."

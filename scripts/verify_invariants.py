@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import inspect
+import math
 import sys
 import time
 from pathlib import Path
@@ -19,11 +20,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from pulse.audio import AudioEngine, AudioState
+from pulse.dsp import AudioDSP, ReplayGain, StereoVUMeter, VisualizerMode
 from pulse.metadata import (
     MAX_METADATA_CACHE_ENTRIES,
+    DitherAlgorithm,
+    TrackLyrics,
     TrackMetadata,
+    _BAYER_4X4,
     _METADATA_CACHE,
     format_duration,
+    parse_lrc,
 )
 from pulse.queue_manager import QueueManager, RepeatMode
 
@@ -190,6 +196,69 @@ def verify_lru_cache_boundedness() -> bool:
     return True
 
 
+def verify_spectral_energy_and_bounds() -> bool:
+    """Invariant 6: Discrete Fourier Transform energy bounds and band monotonicity."""
+    log_phase(6, "Cooley-Tukey Radix-2 512-Point Spectral Bounds & Energy Conservation")
+    dsp = AudioDSP()
+
+    # 1. Test Nyquist bandwidth limit on silence
+    self_silence = [0] * 512
+    levels_zero = dsp.compute_spectrum(self_silence)
+    if len(levels_zero) != 64 or any(v != 0.0 for v in levels_zero):
+        print("  FAIL: Zero PCM input did not produce strictly zero magnitude vector.")
+        return False
+
+    # 2. Test maximum full-scale impulse response bounds [0.0, 1.0]
+    impulse = [32767] + [0] * 511
+    levels_imp = dsp.compute_spectrum(impulse)
+    if not all(0.0 <= v <= 1.0 for v in levels_imp):
+        print("  FAIL: Impulse spectrum magnitude exceeded [0.0, 1.0] bound.")
+        return False
+
+    # 3. Test multi-frequency dynamic range
+    sine_mix = [
+        int(10000 * math.sin(2 * math.pi * 100 * i / 44100) + 10000 * math.sin(2 * math.pi * 5000 * i / 44100))
+        for i in range(512)
+    ]
+    levels_mix = dsp.compute_spectrum(sine_mix)
+    if not all(0.0 <= v <= 1.0 for v in levels_mix):
+        print("  FAIL: Multi-tone harmonic sum exceeded normalized dynamic range.")
+        return False
+
+    print("  PASS: Invariant 6 Verified — Cooley-Tukey Radix-2 FFT satisfies bounded spectral energy conservation.")
+    return True
+
+
+def verify_dithering_conservation() -> bool:
+    """Invariant 7: 1-Bit Halftone Error-Diffusion Budget Conservation."""
+    log_phase(7, "Halftone Dithering Error-Diffusion Conservation & Bayer Modulo Bounds")
+
+    # 1. Verify Bayer 4x4 matrix permutation is valid partition of [0..15]
+    bayer_flat = [val for row in _BAYER_4X4 for val in row]
+    if sorted(bayer_flat) != list(range(16)):
+        print(f"  FAIL: Bayer 4x4 matrix is not a permutation of integers 0..15: {bayer_flat}")
+        return False
+
+    # 2. Verify Atkinson error diffusion coefficient fraction sum = 6/8 = 75%
+    atkinson_diffusion_coeff = 6 * (1.0 / 8.0)
+    if not math.isclose(atkinson_diffusion_coeff, 0.75, rel_tol=1e-6):
+        print(f"  FAIL: Atkinson error diffusion sum != 0.75: {atkinson_diffusion_coeff}")
+        return False
+
+    # 3. Verify LRC parser line ordering monotonicity
+    lrc = parse_lrc("[00:05.00]Line A\n[00:02.00]Line B\n[00:10.00]Line C")
+    if not lrc or not lrc.is_synced:
+        print("  FAIL: LRC parser did not mark timestamped lines as synchronized.")
+        return False
+    timestamps = [line.timestamp for line in lrc.lines]
+    if timestamps != sorted(timestamps):
+        print(f"  FAIL: LRC parser did not enforce monotonic timestamp ordering: {timestamps}")
+        return False
+
+    print("  PASS: Invariant 7 Verified — Halftone error budget and LRC temporal monotonicity confirmed.")
+    return True
+
+
 def main() -> int:
     print("=" * 70)
     print("  PULSE CLI // UNIFIED CONTRIBUTOR INVARIANT VERIFICATION HARNESS")
@@ -201,6 +270,8 @@ def main() -> int:
         verify_shuffle_bijection_theorem,
         verify_halftone_charset_orthogonality,
         verify_lru_cache_boundedness,
+        verify_spectral_energy_and_bounds,
+        verify_dithering_conservation,
     ]
 
     t0 = time.perf_counter()

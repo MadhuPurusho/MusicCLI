@@ -208,6 +208,10 @@ Because standard terminal fonts exhibit an aspect ratio of approximately $1:2$ (
 | `P` | Previous Track | Rewinds to $0.0\text{ s}$ if $> 3.0\text{ s}$ into track, else previous |
 | `R` | Cycle Repeat Mode | `OFF` $\rightarrow$ `TRACK` $\rightarrow$ `QUEUE` $\rightarrow$ `OFF` |
 | `S` | Toggle Shuffle | Toggles Fisher-Yates permutation vector with cursor retention |
+| `O` | Cycle Visualizer | Cycles visualizer: `SPECTRUM` (64-band FFT), `WAVEFORM` (Oscilloscope), `STEREO_VU` (dB meters) |
+| `T` | Cycle Dithering | Cycles halftone mode: `ATKINSON` (Mac 1984 75%), `FLOYD_STEINBERG`, `BAYER` (4x4 ordered) |
+| `L` | Toggle Lyrics / Art | Toggles Pane 3 between 1-Bit Album Art and Synchronized Karaoke Scrolling Lyrics |
+| `G` | Toggle ReplayGain | Enables/disables ReplayGain / EBU R128 loudness normalization ($10^{(G/20)}$ linear scaling) |
 | `V` | In-CLI Cover Modal | Expands high-resolution 1-bit pixel art modal in curses |
 | `Tab` | Switch Focus Pane | Cycles active focus: `1: FILES` $\rightarrow$ `2: QUEUE` $\rightarrow$ `3: ALBUM ART` |
 | `1` / `2` / `3` | Direct Pane Select | Focuses selected pane directly |
@@ -288,15 +292,20 @@ MusicCLI/
 |-- pulse/
 |   |-- __init__.py           # Package version definition
 |   |-- __main__.py          # CLI entry point, argument parsing & bootstrap
-|   |-- app.py               # Double-buffered 1-bit POSIX curses rendering loop
-|   |-- audio.py             # CoreAudio / miniaudio real-time PCM streaming engine
-|   |-- metadata.py          # ID3/FLAC AST tag parser & 1-bit halftone synthesizer
+|   |-- app.py               # Double-buffered 1-bit POSIX curses rendering loop & OSC titles
+|   |-- audio.py             # CoreAudio / miniaudio real-time PCM streaming engine & ramped seek
+|   |-- dsp.py               # Cooley-Tukey Radix-2 512-pt FFT, Stereo VU meter & Oscilloscope
+|   |-- metadata.py          # ID3/FLAC AST tag parser, Atkinson/Bayer dither & LRC parser
 |   `-- queue_manager.py     # Deterministic permutation queue & history tracker
 |-- tests/
-|   `-- test_backend.py      # Automated unit tests for audio, queue, and metadata
+|   `-- test_backend.py      # Automated unit tests (28 tests: FFT, VU, Dither, LRC, Audio)
+|-- scripts/
+|   |-- preflight.sh         # Automated pre-submission verification runner for contributors
+|   `-- verify_invariants.py # Unified Contributor Invariant Verification Harness (7 phases)
 |-- docs/
-|   |-- AUDIO_ENGINE.md      # Low-level audio engine mathematical specification
-|   |-- METADATA_SPEC.md     # Binary container AST & Floyd-Steinberg algorithm spec
+|   |-- AUDIO_ENGINE.md      # Low-level audio engine & Cooley-Tukey Radix-2 FFT mathematical spec
+|   |-- METADATA_SPEC.md     # Binary container AST, Atkinson 1984 dither & LRC grammar spec
+|   |-- DEVELOPER_GUIDE.md   # Mathematical invariants, AST validation & contribution lifecycle
 |   |-- preview.png          # High-resolution terminal capture
 |   `-- preview.svg          # Vector preview diagram
 |-- ARCHITECTURE.md          # Multi-threaded subsystem architecture specification
@@ -312,7 +321,7 @@ MusicCLI/
 
 ## 9. Verification & Deterministic Testing
 
-The backend test suite verifies concurrency invariants, memory bounds, error formatting, and queue permutations:
+The backend test suite verifies concurrency invariants, Cooley-Tukey FFT energy conservation, Atkinson dithering error budgets, memory bounds, error formatting, and queue permutations:
 
 ```bash
 ~/.pulse-cli/venv/bin/python3 -m unittest tests/test_backend.py -v
@@ -320,10 +329,20 @@ The backend test suite verifies concurrency invariants, memory bounds, error for
 
 Output:
 ```
+test_fft_spectrum_silence (tests.test_backend.TestAudioDSP.test_fft_spectrum_silence) ... ok
+test_fft_spectrum_sine_wave (tests.test_backend.TestAudioDSP.test_fft_spectrum_sine_wave) ... ok
+test_replay_gain_math (tests.test_backend.TestAudioDSP.test_replay_gain_math) ... ok
+test_stereo_vu_meter (tests.test_backend.TestAudioDSP.test_stereo_vu_meter) ... ok
+test_waveform_oscilloscope (tests.test_backend.TestAudioDSP.test_waveform_oscilloscope) ... ok
 test_initial_state (tests.test_backend.TestAudioEngine.test_initial_state) ... ok
+test_replay_gain_toggle (tests.test_backend.TestAudioEngine.test_replay_gain_toggle) ... ok
 test_seek_to_end_triggers_finished (tests.test_backend.TestAudioEngine.test_seek_to_end_triggers_finished) ... ok
 test_unload (tests.test_backend.TestAudioEngine.test_unload) ... ok
+test_visualizer_mode_cycling (tests.test_backend.TestAudioEngine.test_visualizer_mode_cycling) ... ok
 test_volume_controls (tests.test_backend.TestAudioEngine.test_volume_controls) ... ok
+test_dither_enum_cycle (tests.test_backend.TestDitherAndLyrics.test_dither_enum_cycle) ... ok
+test_lrc_parser_multiple_timestamps (tests.test_backend.TestDitherAndLyrics.test_lrc_parser_multiple_timestamps) ... ok
+test_lrc_parser_synced (tests.test_backend.TestDitherAndLyrics.test_lrc_parser_synced) ... ok
 test_format_duration_edge_cases (tests.test_backend.TestFormatters.test_format_duration_edge_cases) ... ok
 test_format_duration_normal (tests.test_backend.TestFormatters.test_format_duration_normal) ... ok
 test_format_file_size (tests.test_backend.TestFormatters.test_format_file_size) ... ok
@@ -340,9 +359,14 @@ test_sequential_navigation (tests.test_backend.TestQueueManager.test_sequential_
 test_shuffle_cycle_and_prev (tests.test_backend.TestQueueManager.test_shuffle_cycle_and_prev) ... ok
 
 ----------------------------------------------------------------------
-Ran 18 tests in 0.208s
+Ran 28 tests in 0.226s
 
 OK
+```
+
+Execute the preflight verification harness prior to submitting any PR:
+```bash
+./scripts/preflight.sh
 ```
 
 ---

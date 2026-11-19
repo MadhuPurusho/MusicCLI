@@ -1,12 +1,25 @@
 """Comprehensive test suite for Pulse CLI backend engine."""
 
+import array
 import math
 import time
 import unittest
 from pathlib import Path
 
 from pulse.audio import AudioEngine, AudioState
-from pulse.metadata import TrackMetadata, format_duration, format_file_size
+from pulse.dsp import AudioDSP, ReplayGain, StereoVUMeter, VisualizerMode, WaveformOscilloscope
+from pulse.metadata import (
+    DitherAlgorithm,
+    LyricsLine,
+    TrackLyrics,
+    TrackMetadata,
+    _dither_atkinson,
+    _dither_bayer,
+    _dither_floyd_steinberg,
+    format_duration,
+    format_file_size,
+    parse_lrc,
+)
 from pulse.queue_manager import QueueManager, RepeatMode
 
 
@@ -204,6 +217,113 @@ class TestAudioEngine(unittest.TestCase):
         self.assertEqual(self.engine._total_frames, 0)
         self.assertEqual(self.engine._current_frame, 0)
         self.assertEqual(self.engine.state, AudioState.STOPPED)
+
+    def test_visualizer_mode_cycling(self):
+        self.assertEqual(self.engine.get_visualizer_mode(), VisualizerMode.SPECTRUM)
+        m2 = self.engine.cycle_visualizer_mode()
+        self.assertEqual(m2, VisualizerMode.WAVEFORM)
+        m3 = self.engine.cycle_visualizer_mode()
+        self.assertEqual(m3, VisualizerMode.STEREO_VU)
+        m4 = self.engine.cycle_visualizer_mode()
+        self.assertEqual(m4, VisualizerMode.SPECTRUM)
+
+    def test_replay_gain_toggle(self):
+        self.assertTrue(self.engine.replay_gain_enabled)
+        state = self.engine.toggle_replay_gain()
+        self.assertFalse(state)
+        self.assertFalse(self.engine.replay_gain_enabled)
+
+
+class TestAudioDSP(unittest.TestCase):
+    def setUp(self):
+        self.dsp = AudioDSP()
+
+    def test_fft_spectrum_silence(self):
+        silence = [0] * 512
+        levels = self.dsp.compute_spectrum(silence)
+        self.assertEqual(len(levels), 64)
+        for val in levels:
+            self.assertEqual(val, 0.0)
+
+    def test_fft_spectrum_sine_wave(self):
+        # 441 Hz sine wave at 44100 Hz sample rate (period = 100 samples)
+        # 512 samples with ~5.12 full periods
+        chunk = [int(16000 * math.sin(2.0 * math.pi * 441.0 * i / 44100.0)) for i in range(512)]
+        levels = self.dsp.compute_spectrum(chunk)
+        self.assertEqual(len(levels), 64)
+        self.assertTrue(all(0.0 <= lvl <= 1.0 for lvl in levels))
+        # Fundamental ~441 Hz falls into band 4-6
+        max_idx = levels.index(max(levels))
+        self.assertIn(max_idx, range(3, 8))
+
+    def test_stereo_vu_meter(self):
+        chunk = array.array("h", [16000, -8000, 12000, -6000])
+        peak_l, peak_r, db_l, db_r = StereoVUMeter.compute(chunk, channels=2)
+        self.assertGreater(peak_l, 0.0)
+        self.assertLessEqual(peak_l, 1.0)
+        self.assertGreater(peak_r, 0.0)
+        self.assertLessEqual(peak_r, 1.0)
+        self.assertGreaterEqual(db_l, -60.0)
+        self.assertGreaterEqual(db_r, -60.0)
+
+    def test_waveform_oscilloscope(self):
+        chunk = array.array("h", [int(16000 * math.sin(i / 10.0)) for i in range(512)])
+        lines = WaveformOscilloscope.render(chunk, width=30, height=8, channels=1)
+        self.assertEqual(len(lines), 6)  # inner height = height - 2
+        for line in lines:
+            self.assertEqual(len(line), 28)  # inner width = width - 2
+
+    def test_replay_gain_math(self):
+        self.assertAlmostEqual(ReplayGain.parse_gain_db("-6.0 dB"), -6.0)
+        self.assertAlmostEqual(ReplayGain.parse_gain_db("+3.2 LUFS"), 3.2)
+        self.assertAlmostEqual(ReplayGain.parse_gain_db("invalid"), 0.0)
+        # 0 dB gain -> multiplier 1.0
+        self.assertAlmostEqual(ReplayGain.to_linear_scale(0.0), 1.0)
+        # -6 dB gain -> multiplier ~0.501
+        self.assertAlmostEqual(ReplayGain.to_linear_scale(-6.0), 10 ** (-6.0 / 20.0), places=3)
+
+
+class TestDitherAndLyrics(unittest.TestCase):
+    def test_dither_enum_cycle(self):
+        d = DitherAlgorithm.ATKINSON
+        d = d.next_algorithm()
+        self.assertEqual(d, DitherAlgorithm.FLOYD_STEINBERG)
+        d = d.next_algorithm()
+        self.assertEqual(d, DitherAlgorithm.BAYER)
+        d = d.next_algorithm()
+        self.assertEqual(d, DitherAlgorithm.ATKINSON)
+
+    def test_lrc_parser_synced(self):
+        lrc_text = """[ti:Test Title]
+[ar:Test Artist]
+[00:04.50]Line 1 lyrics
+[00:12.80]Line 2 lyrics
+[00:25.00]Line 3 lyrics
+"""
+        lyrics = parse_lrc(lrc_text)
+        self.assertIsNotNone(lyrics)
+        self.assertTrue(lyrics.is_synced)
+        self.assertEqual(len(lyrics.lines), 3)
+        self.assertAlmostEqual(lyrics.lines[0].timestamp, 4.5)
+        self.assertEqual(lyrics.lines[0].text, "Line 1 lyrics")
+        self.assertAlmostEqual(lyrics.lines[1].timestamp, 12.8)
+        self.assertEqual(lyrics.lines[2].text, "Line 3 lyrics")
+
+        # Test temporal lookup
+        self.assertEqual(lyrics.get_current_index(2.0), 0)
+        self.assertEqual(lyrics.get_current_index(5.0), 0)
+        self.assertEqual(lyrics.get_current_index(15.0), 1)
+        self.assertEqual(lyrics.get_current_index(30.0), 2)
+
+    def test_lrc_parser_multiple_timestamps(self):
+        lrc_text = "[00:10.00][00:20.00]Chorus line"
+        lyrics = parse_lrc(lrc_text)
+        self.assertIsNotNone(lyrics)
+        self.assertEqual(len(lyrics.lines), 2)
+        self.assertAlmostEqual(lyrics.lines[0].timestamp, 10.0)
+        self.assertAlmostEqual(lyrics.lines[1].timestamp, 20.0)
+        self.assertEqual(lyrics.lines[0].text, "Chorus line")
+        self.assertEqual(lyrics.lines[1].text, "Chorus line")
 
 
 if __name__ == "__main__":

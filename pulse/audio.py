@@ -11,6 +11,7 @@ from typing import Callable, List, Optional, Tuple
 
 import miniaudio
 
+from pulse.dsp import AudioDSP, ReplayGain, StereoVUMeter, VisualizerMode, WaveformOscilloscope
 from pulse.metadata import TrackMetadata
 
 
@@ -40,7 +41,15 @@ class AudioEngine:
         self.is_muted: bool = False
         self._prev_volume: float = 0.85
 
+        self.dsp = AudioDSP()
+        self.visualizer_mode: VisualizerMode = VisualizerMode.SPECTRUM
         self.levels: List[float] = [0.0] * self.NUM_VISUALIZER_BARS
+        self.stereo_levels: Tuple[float, float, float, float] = (0.0, 0.0, -60.0, -60.0)
+        self._waveform_buffer: array.array = array.array("h")
+        self.replay_gain_scale: float = 1.0
+        self.replay_gain_enabled: bool = True
+        self._seek_ramp_frames: int = 0
+
         self.track_finished_flag: bool = False
         self.on_track_end: Optional[Callable[[], None]] = None
 
@@ -68,9 +77,14 @@ class AudioEngine:
             raw_chunk = None
             eff_vol = 0.0
             finished_callback = None
+            ramp_needed = 0
 
             with self._lock:
-                eff_vol = 0.0 if self.is_muted else self.volume
+                base_vol = 0.0 if self.is_muted else self.volume
+                eff_vol = base_vol * (self.replay_gain_scale if self.replay_gain_enabled else 1.0)
+                eff_vol = max(0.0, min(1.0, eff_vol))
+                ramp_needed = self._seek_ramp_frames
+                self._seek_ramp_frames = 0
 
                 if self.state == AudioState.PLAYING and self._samples is not None:
                     if self._current_frame >= self._total_frames:
@@ -108,9 +122,17 @@ class AudioEngine:
             if raw_chunk is not None:
                 if eff_vol <= 0.001:
                     data = b"\x00" * (len(raw_chunk) * 2)
-                elif eff_vol < 0.98:
+                elif eff_vol < 0.98 or ramp_needed > 0:
                     v_int = int(eff_vol * 32768)
                     scaled_samples = array.array("h", ((s * v_int) >> 15 for s in raw_chunk))
+                    if ramp_needed > 0:
+                        ramp_len = min(ramp_needed, len(scaled_samples) // self.CHANNELS)
+                        for f in range(ramp_len):
+                            factor = f / float(ramp_needed)
+                            idx_l = f * self.CHANNELS
+                            scaled_samples[idx_l] = int(scaled_samples[idx_l] * factor)
+                            if self.CHANNELS > 1:
+                                scaled_samples[idx_l + 1] = int(scaled_samples[idx_l + 1] * factor)
                     data = scaled_samples.tobytes()
                 else:
                     data = raw_chunk.tobytes()
@@ -124,36 +146,59 @@ class AudioEngine:
             num_frames = yield data
 
     def _update_levels(self, chunk: array.array) -> None:
-        """Compute visualizer bar levels from active audio PCM chunk using C-optimized peak detection."""
+        """Compute real-time 64-band FFT spectrum and stereo VU levels."""
         if not chunk:
             self._decay_levels()
             return
 
+        # 1. Update Stereo VU meters (peak + dBFS RMS)
+        self.stereo_levels = StereoVUMeter.compute(chunk, self.CHANNELS)
+
+        # 2. Store sample buffer for oscilloscope waveform
+        self._waveform_buffer = chunk[:min(len(chunk), 2048)]
+
+        # 3. Downmix chunk to 512 mono samples for Radix-2 Cooley-Tukey FFT
         chunk_len = len(chunk)
-        num_bars = self.NUM_VISUALIZER_BARS
-        step = max(1, chunk_len // num_bars)
+        if self.CHANNELS == 2:
+            step = max(1, (chunk_len // 2) // AudioDSP.FFT_SIZE)
+            mono = [
+                (chunk[i * 2] + chunk[i * 2 + 1]) >> 1
+                for i in range(0, min(chunk_len // 2, AudioDSP.FFT_SIZE * step), step)
+            ][:AudioDSP.FFT_SIZE]
+        else:
+            step = max(1, chunk_len // AudioDSP.FFT_SIZE)
+            mono = [chunk[i] for i in range(0, min(chunk_len, AudioDSP.FFT_SIZE * step), step)][:AudioDSP.FFT_SIZE]
 
-        for b in range(num_bars):
-            sub = chunk[b * step : (b + 1) * step]
-            if not sub:
-                self.levels[b] = max(0.0, self.levels[b] * 0.75)
-                continue
-
-            # Compute peak amplitude normalized to [0, 1] using C-optimized min/max
-            peak = max(abs(min(sub)), abs(max(sub))) / 32768.0
-            # Non-linear perceptual scaling matching acoustic power-law specifications
-            target = min(1.0, math.pow(peak, 0.38) * 1.65)
-
-            # Attack / decay smoothing
-            if target > self.levels[b]:
-                self.levels[b] = self.levels[b] * 0.15 + target * 0.85
-            else:
-                self.levels[b] = self.levels[b] * 0.70 + target * 0.30
+        if len(mono) >= AudioDSP.FFT_SIZE:
+            fft_levels = self.dsp.compute_spectrum(mono)
+            for b in range(self.NUM_VISUALIZER_BARS):
+                target = fft_levels[b]
+                if target > self.levels[b]:
+                    self.levels[b] = self.levels[b] * 0.15 + target * 0.85
+                else:
+                    self.levels[b] = self.levels[b] * 0.65 + target * 0.35
+        else:
+            # Fallback if chunk underflows FFT size
+            num_bars = self.NUM_VISUALIZER_BARS
+            step_bar = max(1, chunk_len // num_bars)
+            for b in range(num_bars):
+                sub = chunk[b * step_bar : (b + 1) * step_bar]
+                if sub:
+                    peak = max(abs(min(sub)), abs(max(sub))) / 32768.0
+                    target = min(1.0, math.pow(peak, 0.38) * 1.65)
+                    self.levels[b] = self.levels[b] * 0.20 + target * 0.80
 
     def _decay_levels(self) -> None:
-        """Decay spectrum bars toward zero when audio is silent/idle."""
+        """Decay spectrum bars and VU meters toward zero when audio is silent/idle."""
         for b in range(self.NUM_VISUALIZER_BARS):
             self.levels[b] = max(0.0, self.levels[b] * 0.72 - 0.02)
+        p_l, p_r, db_l, db_r = self.stereo_levels
+        self.stereo_levels = (
+            max(0.0, p_l * 0.75 - 0.02),
+            max(0.0, p_r * 0.75 - 0.02),
+            max(-60.0, db_l - 3.0),
+            max(-60.0, db_r - 3.0),
+        )
 
     def load_track(self, metadata: TrackMetadata) -> bool:
         """Decode and load an MP3 or FLAC track into memory."""
@@ -166,13 +211,16 @@ class AudioEngine:
                 nchannels=self.CHANNELS,
                 sample_rate=self.SAMPLE_RATE,
             )
+            rg_db = getattr(metadata, "replay_gain_db", 0.0)
             with self._lock:
                 self._samples = decoded.samples
                 self._total_frames = decoded.num_frames
                 self._current_frame = 0
                 self.current_track = metadata
+                self.replay_gain_scale = ReplayGain.to_linear_scale(rg_db) if rg_db != 0.0 else 1.0
                 self.state = AudioState.PLAYING
                 self.track_finished_flag = False
+                self._seek_ramp_frames = 128
             if decoded.num_frames > 0:
                 metadata.duration = decoded.num_frames / self.SAMPLE_RATE
             return True
@@ -228,6 +276,7 @@ class AudioEngine:
                 return 0.0
             delta_frames = int(delta_seconds * self.SAMPLE_RATE)
             self._current_frame = max(0, min(self._total_frames, self._current_frame + delta_frames))
+            self._seek_ramp_frames = 128
             if self._current_frame >= self._total_frames and self.state == AudioState.PLAYING:
                 self.state = AudioState.STOPPED
                 self.track_finished_flag = True
@@ -242,12 +291,41 @@ class AudioEngine:
                 return 0.0
             target_frame = int(target_seconds * self.SAMPLE_RATE)
             self._current_frame = max(0, min(self._total_frames, target_frame))
+            self._seek_ramp_frames = 128
             if self._current_frame >= self._total_frames and self.state == AudioState.PLAYING:
                 self.state = AudioState.STOPPED
                 self.track_finished_flag = True
             elif self._current_frame < self._total_frames:
                 self.track_finished_flag = False
             return self._current_frame / self.SAMPLE_RATE
+
+    def cycle_visualizer_mode(self) -> VisualizerMode:
+        """Cycle visualizer display mode: SPECTRUM -> WAVEFORM -> STEREO_VU."""
+        with self._lock:
+            self.visualizer_mode = self.visualizer_mode.next_mode()
+            return self.visualizer_mode
+
+    def get_visualizer_mode(self) -> VisualizerMode:
+        """Return currently active visualizer mode."""
+        with self._lock:
+            return self.visualizer_mode
+
+    def get_stereo_levels(self) -> Tuple[float, float, float, float]:
+        """Return (peak_left, peak_right, db_left, db_right)."""
+        with self._lock:
+            return self.stereo_levels
+
+    def get_waveform_lines(self, width: int, height: int) -> List[str]:
+        """Generate discrete oscilloscope waveform string lines."""
+        with self._lock:
+            buf = array.array("h", self._waveform_buffer)
+        return WaveformOscilloscope.render(buf, width, height, self.CHANNELS)
+
+    def toggle_replay_gain(self) -> bool:
+        """Toggle ReplayGain loudness normalization."""
+        with self._lock:
+            self.replay_gain_enabled = not self.replay_gain_enabled
+            return self.replay_gain_enabled
 
     def set_volume(self, volume: float) -> float:
         """Set volume level between 0.0 and 1.0."""

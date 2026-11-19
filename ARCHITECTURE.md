@@ -186,3 +186,46 @@ To eliminate flickering, Pulse CLI leverages curses virtual window buffering:
 1. `stdscr.erase()` clears the in-memory back-buffer without issuing VT100 clear-screen escape codes (`\033[2J`).
 2. Pane borders, track lists, equalizers, and pixel art are written to the back-buffer using `_safe_addstr()` with boundary clipping.
 3. `stdscr.refresh()` computes the minimal character diff against the physical terminal screen and flushes only changed cells via POSIX write calls.
+
+---
+
+## 7. Digital Signal Processing (DSP) & Tri-Mode Visualizer Pipeline
+
+The `pulse.dsp` module introduces zero-dependency, pure-Python digital signal processing primitives executing in sub-millisecond execution windows.
+
+```
++-------------------------------------------------------------------------------------------------+
+|                                    pulse.dsp Subsystem                                          |
+|                                                                                                 |
+|   +---------------------+     +----------------------+     +--------------------------------+   |
+|   |   AudioDSP Engine   |     |   StereoVUMeter      |     |     WaveformOscilloscope       |   |
+|   | - 512-pt Cooley-    |     | - True-Peak Norm     |     | - Discrete PCM Downsampling    |   |
+|   |   Tukey Radix-2 FFT |     | - RMS Power Integral |     | - Terminal Coordinate Mapping  |   |
+|   | - Hann Windowing    |     | - dBFS Math (-60..+3)|     | - Unicode Half-Block Rendering |   |
+|   | - 64 Octave Bands   |     | - Clip Warning Logic |     +--------------------------------+   |
+|   +---------------------+     +----------------------+                                          |
++-------------------------------------------------------------------------------------------------+
+```
+
+### 7.1 Visualizer Operational Modes
+1. **`VisualizerMode.SPECTRUM`**:
+   512-point Cooley-Tukey Radix-2 FFT with periodic Hann windowing, mapped into 64 logarithmic octave frequency bands with peak-hold decay dots.
+2. **`VisualizerMode.WAVEFORM`**:
+   Discrete-time real-time oscilloscopic PCM trace rendering continuous time-domain waveform deflection using Unicode block elements (`─`, `▀`, `▄`).
+3. **`VisualizerMode.STEREO_VU`**:
+   Dual Left/Right analog dB level meters with RMS power estimation, true-peak tracking, calibrated tick scales, and dynamic clip warnings (`[CLIP!]`).
+
+---
+
+## 8. Dynamic VT100 OSC Terminal Protocol
+
+Pulse CLI leverages the standard VT100 Operating System Command (OSC) escape sequence to update the host terminal emulator's window title and tab title dynamically:
+
+$$\text{OSC Sequence: } \texttt{\textbackslash 033]0;}\langle \text{Title String} \rangle\texttt{\textbackslash 007}$$
+
+Title formatting updates on state transitions:
+* **Playing**: `▶ Artist - Title // PULSE`
+* **Paused**: `⏸ Artist - Title // PULSE`
+* **Stopped/Idle**: `■ PULSE CLI // [IDLE]`
+
+Written directly to `sys.stdout` outside curses window buffers, ensuring complete cross-terminal compatibility across macOS Terminal.app, iTerm2, Alacritty, Kitty, WezTerm, and tmux.
